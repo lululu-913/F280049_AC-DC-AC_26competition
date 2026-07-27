@@ -20,7 +20,6 @@
 #include "oled.h"                                                           // 包含OLED显示驱动接口
 
 //********** 函数声明 **********//
-__interrupt void epwm1_isr(void);                                           // 保留的ePWM1中断服务函数
 __interrupt void adcA1ISR(void);                                            // 20kHz ADC中断与全部实时控制算法
 
 void InitADC(void);                                                         // 初始化ADCA、ADCB与ADCC模拟模块
@@ -40,14 +39,11 @@ void EPWM6_Init(void);                                                      // �
 
 void PLL1(float UI);                                                        // SOGI-PLL输入电压锁相计算
 void PID1_Init(void);                                                       // 初始化母线电压外环参数
-void PID2_Init(void);                                                       // 初始化输入电流内环参数
+void PID2_Init(void);                                                       // 初始化输入电流PI控制器
 void PIDa_Init(void);                                                       // 初始化逆变输出电压控制参数
-void PIDc_Init(void);                                                       // 初始化备用PID参数
 float PID1_Cal(float u);                                                    // 计算母线电压外环增量
-float PID2_Cal(float u);                                                    // 计算输入电流内环输出
+float PID2_Cal(float u);                                                    // 计算输入电流PI控制输出
 float PIDa_Cal(float u);                                                    // 计算逆变调制分母增量
-float PIDc_Cal(float u);                                                    // 计算备用PID输出
-float PR_controla(float ixa, float kpa);                                    // 执行A相离散PR控制
 
 static void PWM_ForceAllLow(void);                                          // 通过Trip Zone立即关断全部ePWM输出
 static void PWM_TripInverter(void);                                         // 仅通过Trip Zone关断逆变侧ePWM1～3
@@ -55,8 +51,12 @@ static void PWM_TripRectifier(void);                                        // �
 static void PWM_ReleaseInverter(void);                                      // 按预装阶段释放逆变侧ePWM1～3
 static void PWM_ReleaseRectifier(void);                                     // 按预装阶段释放整流侧ePWM4/5
 static void SVPWM_Calculate(float phase_a, float phase_b, float phase_c,     // 计算保持现有相序和基波幅值的SVPWM三相占空比
-                            float modulation, float *duty_a,
+                            float modulation_a, float modulation_b,
+                            float modulation_c, float *duty_a,
                             float *duty_b, float *duty_c);
+static void PhaseBalance_Calculate(float ua_rms, float ub_rms, float uc_rms,// 计算零和、同比例限幅的三相幅值补偿
+                                   float *trim_a, float *trim_b,
+                                   float *trim_c);
 
 //********** 按键变量（沿用F280049工程板引脚）**********//
 #define KEY_H1          (GpioDataRegs.GPADAT.bit.GPIO27)                    // 读取对应目标板按键GPIO电平
@@ -90,16 +90,14 @@ typedef struct {                                                            // �
     float Xin;                                                               // 控制器测量输入值
     float Err;                                                               // 当前控制误差
     float Err_last;                                                          // 上一拍控制误差
-    float Kp, Ki, Kd;                                                        // 比例、积分和微分系数
+    float Kp, Ki;                                                            // 比例和积分系数
     float result;                                                            // 当前控制器输出
-    float result_last;                                                       // 上一拍控制器输出
     float Integral;                                                          // 积分累加状态
 } pidsettings;                                                              // 结束PID结构体定义
 
 pidsettings pid1;                                                           // 母线电压外环控制器
-pidsettings pid2;                                                           // 输入电流内环控制器
+pidsettings pid2;                                                           // 输入电流比例控制器
 pidsettings pida;                                                           // 三相逆变输出电压控制器
-pidsettings pidc;                                                           // 保留的备用控制器
 
 //********** 基础控制变量 **********//
 // F280049系统时钟为100MHz，周期值2500可保持原20kHz开关频率
@@ -112,29 +110,37 @@ pidsettings pidc;                                                           // �
 #define FREQ_KEY_REPEAT_ISR_DIV 5000                                        // KEY1/KEY2按20kHz ISR分频，实现250ms长按重复
 #define GENERAL_KEY_SCAN_ISR_DIV 10000                                      // KEY3～KEY6保持原500ms扫描与重复周期
 #define INPUT_CURRENT_PK_MAX 6.00f                                          // 满功率时限制整流输入电流参考峰值为6.00A
-#define INPUT_OVERCURRENT_LIMIT 8.0f                                        // 设置整流输入瞬时软件过流保护阈值为8A
-#define BUS_OVERVOLTAGE_LIMIT 60.0f                                         // 47.5V默认母线以上保留12.5V瞬时软件过压裕量
+#define INPUT_OVERCURRENT_LIMIT 9.0f                                        // 设置整流输入瞬时软件过流保护阈值为9A
+#define BUS_OVERVOLTAGE_LIMIT 65.0f                                         // 47.5V默认母线以上保留12.5V瞬时软件过压裕量
 #define BUS_CURRENT_SLEW_UP_STEP 0.010f                                     // 每10ms允许外环电流幅值增加0.010A，实现约1.0A/s软启动
 #define BUS_CURRENT_SLEW_DOWN_STEP 0.020f                                   // 每10ms允许外环电流幅值减小0.020A，实现约2.0A/s快速降流
 #define BUS_CONTROL_MIN_VOLTAGE 5.0f                                        // 母线电压归一化分母下限，避免启动时除数过小
 #define CURRENT_CTRL_VOLTAGE_LIMIT 15.0f                                    // 限制电流环电感补偿电压，抑制占空比突变
-#define RECTIFIER_CURRENT_KP 10.0f                                          // 仿照单极性示例设置比例电流控制增益
+#define RECTIFIER_CURRENT_KP 8.0f                                           // 输入电流环比例增益
+#define RECTIFIER_CURRENT_KI 0.01f                                          // 输入电流环保守积分增益
+#define RECTIFIER_CURRENT_INTEGRAL_LIMIT 30.0f                              // 积分状态限幅，对应最大正负0.3V积分补偿
 #define RECTIFIER_FEEDFORWARD_GAIN 0.75f                                     // 仿照单极性示例叠加0.5倍输入电压前馈
 #define RECTIFIER_MODULATION_LIMIT 0.95f                                    // 将单极性调制量Di限制在正负0.95以内
 #define BUS_REF_HEADROOM_VOLTAGE 5.0f                                       // 母线目标至少高于输入电压峰值5V
 #define INVERTER_SOFT_GAIN_UP_STEP 0.02f                                    // 每10ms增加0.02，约0.5s完成逆变软启动
 #define INVERTER_SOFT_GAIN_DOWN_STEP 0.05f                                  // 每10ms减小0.05，约0.2s完成逆变软关断
+#define OUTPUT_COMMON_IIR_ALPHA 0.00624f                                    // 20kHz下约20Hz公共三相电压平方滤波
+#define OUTPUT_PHASE_IIR_ALPHA 0.000628f                                    // 20kHz下约2Hz单相电压平方滤波，抑制100Hz分量
+#define BUS_FEEDFORWARD_IIR_ALPHA 0.086f                                    // 20kHz下约300Hz母线前馈滤波，跟踪100Hz纹波
+#define BUS_FEEDFORWARD_GAIN_MIN 0.85f                                      // 母线前馈最小增益，限制采样异常造成的突降
+#define BUS_FEEDFORWARD_GAIN_MAX 1.15f                                      // 母线前馈最大增益，限制欠压时调制度突升
+#define INVERTER_MODULATION_LIMIT 0.56f                                     // SVPWM公共调制度限幅，含1%平衡补偿仍在线性区
+#define PHASE_BALANCE_KP 0.01f                                              // 每相有效值误差1V对应1%幅值补偿
+#define PHASE_BALANCE_TRIM_LIMIT 0.01f                                      // 每相独立补偿限制在正负1%
+#define PHASE_BALANCE_ENABLE_GAIN 0.95f                                     // 软启动达到95%后才允许相间平衡控制
+#define PHASE_BALANCE_SETTLE_WINDOWS 50U                                    // 满幅后等待50个10ms窗口再启用，即500ms
 #define OLED_REFRESH_DIVIDER 1000                                           // 20kHz中断分频1000次，每50ms请求刷新一行OLED
 
 float U_REF = 24.0f;                                                        // 满功率输入交流额定有效值为24V
-float I_REF = 0.0f;                                                         // 保留的整流输入电流参考初值
 volatile float U_BUS_REF = 47.5f;                                           // 整流输出直流母线默认目标电压为47.5V
 volatile float U_OUT_REF = 17.3205f;                                        // 三相相电压目标为17.3205Vrms，对应线电压30Vrms
 volatile Uint16 output_freq_hz = 50U;                                       // 三相逆变输出频率命令，KEY1/KEY2在45～505Hz内调节
-float U_RMS = 0;                                                            // 保留的采样电压有效值变量
-float I_RMS = 0;                                                            // 保留的采样电流有效值变量
 
-int i = 0, j = 0;                                                           // 保留的通用计数器
 volatile int rectifier_enable = 0;                                          // 整流独立模式命令：0被动整流、1主动整流
 volatile int inverter_enable = 0;                                           // 逆变独立模式命令：0请求关断、1请求运行
 int rectifier_enable_last = 0;                                              // 保存上一拍整流命令以检测KEY3切换边沿
@@ -150,23 +156,35 @@ int oled_row = 0;                                                           // �
 int N_oled = 0;                                                             // OLED刷新请求的20kHz分频计数器
 volatile int oled_refresh_request = 1;                                      // OLED按行刷新请求标志，上电后先请求刷新第0行
 int N = 200;                                                                // 10ms统计窗口长度，与三相输出频率相互独立
-float sum1 = 0, sum2 = 0;                                                   // 独立保存母线平均值累加及逆变输出平方累加
+float sum1 = 0;                                                             // 保存母线平均值累加
 int N_c1 = 0, N_c2 = 0;                                                     // 分别作为整流母线窗口和逆变输出窗口计数器
 float M = 1.94f;                                                            // 47.5V母线输出30V线电压时的额定SVPWM调制分母
 volatile int flag = 0;                                                      // 保护原因标志，由控制ISR写入并由主循环显示
 
-float U_ia = 0, U_ib = 0, U_ic = 0;                                         // 保留的三相输入电压变量
 float U_oa = 0, U_ob = 0, U_oc = 0;                                         // 重构得到的三相输出相电压
-float U_oab = 0, U_obc = 0, U_oac = 0;                                      // 三相输出线电压变量
-float U_iab = 0, U_ibc = 0, U_iac = 0;                                      // 保留的三相输入线电压变量
-float Iref_a = 0, Iref_b = 0, Iref_c = 0;                                   // 保留的三相电流参考值
+float U_oab = 0, U_obc = 0;                                                 // 三相输出线电压变量
 float theta_a = 0, theta_b = 0, theta_c = 0;                                // 三相SPWM参考相位
 float Da = 0.4, Db = 0.4, Dc = 0.4;                                         // 保留的三相占空比变量
 float U_bus = 0;                                                            // 直流母线瞬时采样值
 float U_av = 0;                                                             // 由三相相电压计算的瞬时等效有效值
+float output_common_sq_sample = 0.0f;                                       // 三相相电压平方平均的瞬时样本
+float output_common_sq_f = 0.0f;                                            // 三相公共有效值平方的快速IIR状态
+float output_phase_a_sq_f = 0.0f;                                           // A相有效值平方的慢速IIR状态
+float output_phase_b_sq_f = 0.0f;                                           // B相有效值平方的慢速IIR状态
+float output_phase_c_sq_f = 0.0f;                                           // C相有效值平方的慢速IIR状态
+volatile float U_oa_rms = 0.0f;                                             // 滤波后的A相有效值
+volatile float U_ob_rms = 0.0f;                                             // 滤波后的B相有效值
+volatile float U_oc_rms = 0.0f;                                             // 滤波后的C相有效值
+float U_phase_avg = 0.0f;                                                   // 三相有效值平均，用作独立补偿公共基准
+float U_bus_ff = 47.5f;                                                     // 逆变瞬时母线前馈滤波状态
+float bus_feedforward_gain = 1.0f;                                          // 母线参考值与实时母线值之比
+float inverter_modulation = 0.0f;                                           // 经母线前馈和总限幅后的公共调制度
+float modulation_a = 0.0f, modulation_b = 0.0f, modulation_c = 0.0f;        // 叠加相间平衡补偿后的三相调制度
+float phase_trim_a = 0.0f, phase_trim_b = 0.0f, phase_trim_c = 0.0f;         // 三相零和幅值补偿系数
+Uint16 phase_balance_settle_windows = 0U;                                   // 满幅运行后的平衡控制等待计数
 
-float U_in = 0, U_out = 0;                                                  // 输入电压及保留的输出电压变量
-float I_in = 0, I_out = 0;                                                  // 输入电流及保留的输出电流变量
+float U_in = 0;                                                             // 输入电压
+float I_in = 0;                                                             // 输入电流
 volatile float U_bus_rms = 0;                                               // 直流母线10ms平均值，由控制ISR更新并由主循环显示
 volatile float U_out_rms = 0;                                               // 三相交流输出窗口有效值，由控制ISR更新并由主循环显示
 float pid_out = 0;                                                          // 母线电压外环累计得到的输入电流正峰值
@@ -180,14 +198,6 @@ float u_i_out = 0.0f;                                                       // �
 float i_ctrl = 0.0f;                                                        // 电流补偿与输入电压前馈合成的桥侧电压指令
 volatile float Di = 0.0f;                                                   // ISR更新的单极性整流调制量，后台OLED读取其快照
 float v_dc_bus = 10.0f;                                                     // 单极性调制归一化使用的实时母线电压
-float k_i = RECTIFIER_CURRENT_KP;                                           // 比例电流环增益，保留为变量便于小功率调试
-
-float av = 0;                                                               // 保留的ADC标定平均值
-float su = 0;                                                               // 保留的ADC标定累加值
-int c = 0;                                                                  // 保留的ADC标定计数器
-int g_j = 0;                                                                // 保留的全局计数变量
-int g_i = 0;                                                                // 保留的全局计数变量
-int g_k = 0;                                                                // 保留的全局计数变量
 
 //************* 锁相环参数 *************//
 float W0 = 314.159f;                                                        // 50Hz额定角频率100π
@@ -206,19 +216,6 @@ float ki = 10.0f;                                                           // �
 float err = 0.0f;                                                           // PLL当前q轴误差
 float last_err = 0.0f;                                                      // PLL上一拍q轴误差
 float result = 0.0f;                                                        // PLL本拍角频率修正增量
-
-//************* PR控制器参数 *************//
-float b0 = 3.13647E-01;                                                     // PR控制器当前输入系数
-float b2 = -3.13647E-01;                                                    // PR控制器两拍前输入系数
-float a1 = -1.99662;                                                        // PR控制器一阶反馈系数
-float a2 = 9.96864E-01;                                                     // PR控制器二阶反馈系数
-float out0a = 0;                                                            // PR控制器当前输出状态
-float out1a = 0;                                                            // PR控制器上一拍输出状态
-float out2a = 0;                                                            // PR控制器前两拍输出状态
-float in0a = 0;                                                             // PR控制器当前输入状态
-float in1a = 0;                                                             // PR控制器上一拍输入状态
-float in2a = 0;                                                             // PR控制器前两拍输入状态
-float y1 = 0;                                                               // PR比例项与谐振项合成输出
 
 //******************* 主函数 *******************//
 void main(void)                                                             // 程序入口，完成F280049外设和控制器初始化
@@ -266,9 +263,8 @@ void main(void)                                                             // �
     InitEPWM();                                                             // 冻结时基并配置六组ePWM
     InitADCSOC();                                                           // 配置ADC采样通道、触发源和中断源
     PID1_Init();                                                            // 初始化母线电压外环
-    PID2_Init();                                                            // 初始化输入电流内环
+    PID2_Init();                                                            // 初始化输入电流PI控制器
     PIDa_Init();                                                            // 初始化三相输出电压调节器
-    PIDc_Init();                                                            // 初始化保留的备用调节器
     OLED_Init();                                                            // 初始化OLED显示模块
     OLED_ShowString(0, 0, "R  I  F  M      ");                              // 第0行固定显示整流、逆变、故障和调制分母
     OLED_ShowString(0, 1, "BR      B       ");                              // 固定标签仅在上电初始化时写入第1行
@@ -366,7 +362,7 @@ void InitADCSOC(void)                                                       // �
     AdcaRegs.ADCSOC2CTL.bit.ACQPS = 9;                                      // 设置ADC采样保持窗口为10个SYSCLK
     AdcaRegs.ADCSOC2CTL.bit.TRIGSEL = 9;                                    // 选择ePWM3 SOCA作为硬件触发源
 
-    AdcaRegs.ADCSOC3CTL.bit.CHSEL = 3;                                      // SOC3选择ADCINA3，采集输出线电压U_obc
+    AdcaRegs.ADCSOC3CTL.bit.CHSEL = 3;                                       // SOC3选择ADCINA3，采集输出线电压U_obc
     AdcaRegs.ADCSOC3CTL.bit.ACQPS = 9;                                      // 设置ADC采样保持窗口为10个SYSCLK
     AdcaRegs.ADCSOC3CTL.bit.TRIGSEL = 9;                                    // 选择ePWM3 SOCA作为硬件触发源
 
@@ -393,7 +389,7 @@ __interrupt void adcA1ISR(void)                                             // 2
     I_in = ((float)AdcbResultRegs.ADCRESULT0 - 2077.3f) / 164.61f;            // 按y=164.61x+2077.3将ADCINB0原始值反算为输入电流
 
     if((system_fault == 0) &&                                               // 已有全局故障时不再用局部故障覆盖OLED故障码
-       (fabsf(I_in) > INPUT_OVERCURRENT_LIMIT))                             // 检测输入瞬时电流是否超过7A软件保护阈值
+       (fabsf(I_in) > INPUT_OVERCURRENT_LIMIT))                             // 检测输入瞬时电流是否超过9A软件保护阈值
     {
         rectifier_enable = 0;                                               // 整流过流只撤销主动整流命令，不直接改变逆变运行命令
         rectifier_fault = 1;                                                // 锁存整流局部故障，等待KEY3重新确认启动
@@ -401,7 +397,7 @@ __interrupt void adcA1ISR(void)                                             // 2
         PWM_TripRectifier();                                                // 立即Trip ePWM4/5并退回MOSFET体二极管被动整流
         flag = 1;                                                           // 记录输入过流故障
     }
-    if(U_bus >= BUS_OVERVOLTAGE_LIMIT)                                      // 每个控制周期检测母线是否超过60V软件保护阈值
+    if(U_bus >= BUS_OVERVOLTAGE_LIMIT)                                      // 每个控制周期检测母线是否超过65V软件保护阈值
     {
         rectifier_enable = 0;                                               // 母线过压时撤销主动整流运行命令
         rectifier_fault = 1;                                                // 将母线过压锁存为整流侧局部故障
@@ -422,6 +418,25 @@ __interrupt void adcA1ISR(void)                                             // 2
     U_oa = U_ob + U_oab;                                                    // 由B相相电压和Uab重构A相相电压
     U_oc = -(U_ob + U_oa);                                                  // 利用三相电压和为零重构C相相电压
     U_av = sqrtf((U_oa * U_oa + U_ob * U_ob + U_oc * U_oc) * 0.3333f);      // 计算三相瞬时等效有效值
+    output_common_sq_sample = (U_oa * U_oa + U_ob * U_ob + U_oc * U_oc) *   // 平衡三相时该量不含2倍输出频率脉动
+                              0.3333333f;
+    output_common_sq_f += OUTPUT_COMMON_IIR_ALPHA *                         // 快速滤波公共三相幅值供总电压环使用
+                          (output_common_sq_sample - output_common_sq_f);
+    output_phase_a_sq_f += OUTPUT_PHASE_IIR_ALPHA *                         // 慢速滤波各相平方以抑制单相2倍频脉动
+                           (U_oa * U_oa - output_phase_a_sq_f);
+    output_phase_b_sq_f += OUTPUT_PHASE_IIR_ALPHA *
+                           (U_ob * U_ob - output_phase_b_sq_f);
+    output_phase_c_sq_f += OUTPUT_PHASE_IIR_ALPHA *
+                           (U_oc * U_oc - output_phase_c_sq_f);
+
+    if(U_bus > BUS_CONTROL_MIN_VOLTAGE)                                     // 母线有效时跟踪瞬时母线纹波
+    {
+        U_bus_ff += BUS_FEEDFORWARD_IIR_ALPHA * (U_bus - U_bus_ff);
+    }
+    else                                                                    // 欠压或采样异常时回到参考值，避免除零与突增
+    {
+        U_bus_ff = U_BUS_REF;
+    }
 
     if(rectifier_enable != rectifier_enable_last)                           // 检测KEY3产生的主动整流独立模式切换
     {
@@ -434,8 +449,6 @@ __interrupt void adcA1ISR(void)                                             // 2
             pid1.Err = 0.0f;                                                // 清零母线外环当前误差
             pid1.Err_last = 0.0f;                                           // 清零母线外环上一拍误差，防止切换冲击
             pid1.result = 0.0f;                                             // 清零母线外环本拍电流增量
-            pid1.result_last = 0.0f;                                        // 清零母线外环上一拍电流增量
-            pid1.Integral = 0.0f;                                           // 清零保留的外环积分状态
             rectifier_fault = 0;                                            // 用户重新开启时清除整流局部故障锁存
             if(flag == 1) flag = 0;                                         // 仅清除对应的整流过流显示
         }
@@ -478,8 +491,6 @@ __interrupt void adcA1ISR(void)                                             // 2
         pida.Err = 0.0f;                                                    // 清零逆变电压环当前误差
         pida.Err_last = 0.0f;                                               // 清零逆变电压环上一拍误差
         pida.result = 0.0f;                                                 // 清零逆变电压环本拍增量
-        pida.result_last = 0.0f;                                            // 清零逆变电压环上一拍增量
-        pida.Integral = 0.0f;                                               // 清零逆变电压环保留积分状态
     }
 
     if((rectifier_enable != 0) && (rectifier_fault == 0) &&                 // 存在主动整流运行请求且整流侧无故障
@@ -518,8 +529,13 @@ __interrupt void adcA1ISR(void)                                             // 2
     {
         i_l_ref = I_ref_mag * cosf(theta);                                  // 生成与输入电压同相的瞬时电流参考
         pll_out = i_l_ref;                                                  // 同步旧变量供在线观察瞬时电流参考
-        err_i = i_l_ref - I_in;                                             // 计算输入电流瞬时跟踪误差
-        u_i_out = k_i * err_i;                                              // 采用原比例控制生成电流补偿电压
+        pid2.ref = i_l_ref;                                                 // 逐拍更新输入电流比例控制器参考值
+        u_i_out = PID2_Cal(I_in);                                           // 通过PID2统一计算比例电流补偿电压
+        err_i = pid2.Err;                                                   // 同步PID2误差供在线观察
+        if(u_i_out > CURRENT_CTRL_VOLTAGE_LIMIT)                             // 限制正向电流补偿电压
+            u_i_out = CURRENT_CTRL_VOLTAGE_LIMIT;                           // 防止大电流误差直接把调制量推入饱和
+        else if(u_i_out < -CURRENT_CTRL_VOLTAGE_LIMIT)                       // 限制反向电流补偿电压
+            u_i_out = -CURRENT_CTRL_VOLTAGE_LIMIT;                          // 保持电流补偿电压上下限对称
         i_ctrl = u_i_out + RECTIFIER_FEEDFORWARD_GAIN * U_in;               // 叠加0.5倍输入电压前馈
         middle = i_ctrl;                                                    // 同步旧中间变量便于在线观察
         if(U_bus > BUS_CONTROL_MIN_VOLTAGE) v_dc_bus = U_bus;               // 正常时使用实时母线电压完成调制解耦
@@ -543,6 +559,11 @@ __interrupt void adcA1ISR(void)                                             // 2
         u_i_out = 0.0f;                                                     // 清零整流比例控制输出
         i_ctrl = 0.0f;                                                      // 清零整流桥侧电压指令
         Di = 0.0f;                                                          // 清零整流差模调制量
+        pid2.ref = 0.0f;                                                    // 清零停机状态下的PID2参考
+        pid2.Xin = 0.0f;                                                    // 清零停机状态下的PID2输入
+        pid2.Err = 0.0f;                                                    // 清零停机状态下的PID2误差
+        pid2.Integral = 0.0f;                                               // 清零停机状态下的PID2积分
+        pid2.result = 0.0f;                                                 // 清零停机状态下的PID2输出
     }
 
     if((inverter_pwm_start_stage != 0) && (system_fault == 0))              // 逆变处于预装、待释放或正常运行状态
@@ -553,19 +574,36 @@ __interrupt void adcA1ISR(void)                                             // 2
         if(theta_b >= 2.0f * pi) theta_b -= 2.0f * pi;                      // B相相位超过一周时回绕
         theta_c = theta_a - 2.0944f;                                        // C相保持滞后A相120度
         if(theta_c < 0.0f) theta_c += 2.0f * pi;                            // C相负角度回绕至0～2π
-        SVPWM_Calculate(theta_a, theta_b, theta_c, inverter_soft_gain / M,    // 保持原M标定并注入SVPWM零序共模分量
-                        &Da, &Db, &Dc);
+
+        bus_feedforward_gain = U_BUS_REF / U_bus_ff;                        // 母线升高时主动减小调制度，降低时主动增大调制度
+        if(bus_feedforward_gain > BUS_FEEDFORWARD_GAIN_MAX)                 // 限制欠压或采样扰动造成的前馈突增
+            bus_feedforward_gain = BUS_FEEDFORWARD_GAIN_MAX;
+        else if(bus_feedforward_gain < BUS_FEEDFORWARD_GAIN_MIN)            // 限制母线过高时调制度突降
+            bus_feedforward_gain = BUS_FEEDFORWARD_GAIN_MIN;
+        inverter_modulation = (inverter_soft_gain / M) * bus_feedforward_gain;// 总电压环、软启动和快速母线前馈串联
+        if(inverter_modulation > INVERTER_MODULATION_LIMIT)                 // 保证叠加1%分相补偿后仍处于SVPWM线性区
+            inverter_modulation = INVERTER_MODULATION_LIMIT;
+        else if(inverter_modulation < 0.0f)
+            inverter_modulation = 0.0f;
+        modulation_a = inverter_modulation * (1.0f + phase_trim_a);         // A相叠加独立幅值补偿
+        modulation_b = inverter_modulation * (1.0f + phase_trim_b);         // B相叠加独立幅值补偿
+        modulation_c = inverter_modulation * (1.0f + phase_trim_c);         // C相叠加独立幅值补偿
+        // 按三相独立调制度注入同一个SVPWM零序共模分量
+        SVPWM_Calculate(theta_a, theta_b, theta_c, modulation_a,
+                        modulation_b, modulation_c, &Da, &Db, &Dc);
         EPwm1Regs.CMPA.bit.CMPA = (Uint16)(EPWM_TIMER_TBPRD * Da);           // 将SVPWM A相占空比转换为中心对齐比较值
         EPwm2Regs.CMPA.bit.CMPA = (Uint16)(EPWM_TIMER_TBPRD * Db);           // 将SVPWM B相占空比转换为中心对齐比较值
         EPwm3Regs.CMPA.bit.CMPA = (Uint16)(EPWM_TIMER_TBPRD * Dc);           // 将SVPWM C相占空比转换为中心对齐比较值
 
-        N_c2++;                                                             // 独立累加逆变输出电压10ms统计窗口
-        sum2 += U_av * U_av;                                                // 累加三相输出等效电压平方
-        if(N_c2 >= N)                                                       // 逆变统计窗口达到200个20kHz采样点
+        N_c2++;                                                             // 保留10ms慢速控制与软启动调度节拍
+        if(N_c2 >= N)                                                       // 每200个20kHz采样点更新一次慢速控制状态
         {
             N_c2 = 0;                                                       // 清零逆变统计窗口计数
-            U_out_rms = sqrtf(sum2 / N);                                    // 更新三相输出等效相电压有效值
-            sum2 = 0.0f;                                                    // 清零逆变输出平方累加器
+            U_out_rms = sqrtf(output_common_sq_f);                          // 公共电压环使用快速三相平方IIR的有效值
+            U_oa_rms = sqrtf(output_phase_a_sq_f);                          // 分相补偿使用慢速A相有效值
+            U_ob_rms = sqrtf(output_phase_b_sq_f);                          // 分相补偿使用慢速B相有效值
+            U_oc_rms = sqrtf(output_phase_c_sq_f);                          // 分相补偿使用慢速C相有效值
+            U_phase_avg = (U_oa_rms + U_ob_rms + U_oc_rms) * 0.3333333f;    // 保存三相平均值供在线观察
             if(inverter_soft_stop_active != 0)                              // KEY6关闭请求逆变软关断
             {
                 inverter_soft_gain -= INVERTER_SOFT_GAIN_DOWN_STEP;         // 每10ms降低0.05输出幅值系数
@@ -581,6 +619,33 @@ __interrupt void adcA1ISR(void)                                             // 2
             M += PIDa_Cal(U_out_rms);                                       // 保留原逆变电压环对调制分母M的增量调节
             if(M >= 8) M = 8;                                               // 保留原调制分母上限
             if(M <= 1.8f) M = 1.8f;                                         // SVPWM下限保留约1.9%最小占空比裕量
+
+            if((inverter_pwm_start_stage == 3) &&                           // 仅在PWM已正常释放且软启动基本完成时启用平衡环
+               (inverter_soft_gain >= PHASE_BALANCE_ENABLE_GAIN) &&
+               (inverter_soft_stop_active == 0))
+            {
+                if(phase_balance_settle_windows < PHASE_BALANCE_SETTLE_WINDOWS)
+                    phase_balance_settle_windows++;
+                if(phase_balance_settle_windows >= PHASE_BALANCE_SETTLE_WINDOWS)
+                {
+                    PhaseBalance_Calculate(U_oa_rms, U_ob_rms, U_oc_rms,    // 计算下一控制周期使用的零和三相补偿
+                                           &phase_trim_a, &phase_trim_b,
+                                           &phase_trim_c);
+                }
+                else
+                {
+                    phase_trim_a = 0.0f;
+                    phase_trim_b = 0.0f;
+                    phase_trim_c = 0.0f;
+                }
+            }
+            else
+            {
+                phase_balance_settle_windows = 0U;                          // 软启动或软关断期间禁用独立补偿
+                phase_trim_a = 0.0f;
+                phase_trim_b = 0.0f;
+                phase_trim_c = 0.0f;
+            }
 
             if((inverter_soft_stop_active != 0) &&                          // 软关断过程已经把幅值降至零
                (inverter_soft_gain <= 0.0f))
@@ -599,9 +664,24 @@ __interrupt void adcA1ISR(void)                                             // 2
         EPwm1Regs.CMPA.bit.CMPA = 0;                                        // 清零逆变A相比较值影子寄存器
         EPwm2Regs.CMPA.bit.CMPA = 0;                                        // 清零逆变B相比较值影子寄存器
         EPwm3Regs.CMPA.bit.CMPA = 0;                                        // 清零逆变C相比较值影子寄存器
-        sum2 = 0.0f;                                                        // 清零逆变输出平方累加器
         N_c2 = 0;                                                           // 清零逆变输出统计窗口计数
         U_out_rms = 0.0f;                                                   // 关断状态下清零逆变窗口输出值
+        U_oa_rms = 0.0f;                                                    // 清零三相慢速有效值，防止下次启动沿用旧状态
+        U_ob_rms = 0.0f;
+        U_oc_rms = 0.0f;
+        U_phase_avg = 0.0f;
+        output_common_sq_f = 0.0f;                                          // 清零公共及分相IIR状态
+        output_phase_a_sq_f = 0.0f;
+        output_phase_b_sq_f = 0.0f;
+        output_phase_c_sq_f = 0.0f;
+        phase_balance_settle_windows = 0U;                                  // 下次满幅后重新等待500ms
+        phase_trim_a = 0.0f;                                                // 关断时禁止残留相间补偿
+        phase_trim_b = 0.0f;
+        phase_trim_c = 0.0f;
+        inverter_modulation = 0.0f;
+        modulation_a = 0.0f;
+        modulation_b = 0.0f;
+        modulation_c = 0.0f;
         theta_a = 0.0f;                                                     // 把A相输出相位复位到零点
         theta_b = 2.0944f;                                                  // 把B相输出相位复位到超前120度
         theta_c = 4.1888f;                                                  // 把C相输出相位复位到滞后120度的等效正角
@@ -667,12 +747,9 @@ void PID1_Init(void)                                                        // �
     pid1.ref = U_BUS_REF;                                                   // 初始化母线电压外环参考值
     pid1.Err = 0;                                                           // 计算或清零当前控制误差
     pid1.Err_last = 0;                                                      // 保存或清零上一拍误差
-    pid1.Kp = 0.03f;                                                        // 仿照单极性程序设置母线电压外环比例系数
+    pid1.Kp = 0.05f;                                                        // 仿照单极性程序设置母线电压外环比例系数
     pid1.Ki = 0.001f;                                                       // 仿照单极性程序设置母线电压外环积分系数
-    pid1.Kd = 0;                                                            // 设置微分系数
     pid1.result = 0;                                                        // 计算或清零控制器当前输出
-    pid1.result_last = 0;                                                   // 保存或清零控制器上一拍输出
-    pid1.Integral = 0;                                                      // 更新或清零控制器积分状态
 }
 
 float PID1_Cal(float u)                                                     // 计算母线电压外环增量
@@ -681,58 +758,42 @@ float PID1_Cal(float u)                                                     // �
     pid1.Err = pid1.ref - pid1.Xin;                                         // 母线欠压时产生正误差并提高输入电流幅值
     pid1.result = pid1.Kp * (pid1.Err - pid1.Err_last) + pid1.Ki * pid1.Err; // 计算或清零控制器当前输出
     pid1.Err_last = pid1.Err;                                               // 保存或清零上一拍误差
-    pid1.result_last = pid1.result;                                         // 保存或清零控制器上一拍输出
     return pid1.result;                                                     // 返回母线电压外环增量
 }
 
-//******************* PID2：输入电流内环 *******************//
-void PID2_Init(void)                                                        // 初始化输入电流内环参数
+//******************* PID2：输入电流PI控制器 *******************//
+void PID2_Init(void)                                                        // 初始化输入电流PI控制参数
 {
     pid2.Xin = 0;                                                           // 初始化或更新控制器测量输入
-    pid2.ref = I_REF;                                                       // 初始化控制器参考值
+    pid2.ref = 0;                                                           // 初始化控制器参考值
     pid2.Err = 0;                                                           // 计算或清零当前控制误差
-    pid2.Err_last = 0;                                                      // 保存或清零上一拍误差
-    pid2.Kp = 10.0f;                                                        // 设置20kHz输入电流内环比例系数初值
-    pid2.Ki = 0.05f;                                                        // 设置20kHz输入电流内环积分系数初值
-    pid2.Kd = 0;                                                            // 设置微分系数
+    pid2.Kp = RECTIFIER_CURRENT_KP;                                         // 使用整流输入电流比例增益
+    pid2.Ki = RECTIFIER_CURRENT_KI;                                         // 使用保守积分增益缓慢消除稳态误差
+    pid2.Integral = 0;                                                      // 清零输入电流积分状态
     pid2.result = 0;                                                        // 计算或清零控制器当前输出
-    pid2.result_last = 0;                                                   // 保存或清零控制器上一拍输出
-    pid2.Integral = 0;                                                      // 更新或清零控制器积分状态
 }
 
-float PID2_Cal(float u)                                                     // 计算输入电流内环输出
+float PID2_Cal(float u)                                                     // 计算输入电流PI控制输出
 {
     pid2.Xin = u;                                                           // 初始化或更新控制器测量输入
     pid2.Err = pid2.ref - pid2.Xin;                                         // 计算或清零当前控制误差
-    pid2.Integral += pid2.Err;                                              // 更新或清零控制器积分状态
-    if(pid2.Integral >= 30.0f) pid2.Integral = 30.0f;                       // 限制电流环积分上限，使积分补偿不超过约1.5V
-    else if(pid2.Integral <= -30.0f) pid2.Integral = -30.0f;                // 限制电流环积分下限，使积分补偿不超过约1.5V
-
-    pid2.result = pid2.Kp * pid2.Err + pid2.Ki * pid2.Integral;             // 计算或清零控制器当前输出
-    pid2.Err_last = pid2.Err;                                               // 保存或清零上一拍误差
-    pid2.result_last = pid2.result;                                         // 保存或清零控制器上一拍输出
-    return pid2.result;                                                     // 返回输入电流内环输出
-}
-
-float PR_controla(float ixa, float kpa)                                     // 执行A相离散PR控制
-{
-    in0a = ixa;                                                             // 装入PR控制器当前输入
-    out0a = b0 * in0a + b2 * in2a - a1 * out1a - a2 * out2a;                // 计算PR谐振器当前输出
-    out2a = out1a;                                                          // 将上一拍输出移入两拍前状态
-    out1a = out0a;                                                          // 保存PR当前输出供下一拍使用
-    in2a = in1a;                                                            // 将上一拍输入移入两拍前状态
-    in1a = in0a;                                                            // 保存PR当前输入供下一拍使用
-    y1 = kpa * in0a + out0a;                                                // 叠加比例项与谐振项
-    return y1;                                                              // 返回PR控制器合成输出
+    pid2.Integral += pid2.Err;                                              // 累加输入电流误差
+    if(pid2.Integral > RECTIFIER_CURRENT_INTEGRAL_LIMIT)                    // 限制正向积分状态
+        pid2.Integral = RECTIFIER_CURRENT_INTEGRAL_LIMIT;                   // 最大积分补偿为0.3V
+    else if(pid2.Integral < -RECTIFIER_CURRENT_INTEGRAL_LIMIT)              // 限制反向积分状态
+        pid2.Integral = -RECTIFIER_CURRENT_INTEGRAL_LIMIT;                  // 最小积分补偿为-0.3V
+    pid2.result = pid2.Kp * pid2.Err + pid2.Ki * pid2.Integral;             // 合成比例与积分电流补偿
+    return pid2.result;                                                     // 返回输入电流PI控制输出
 }
 
 static void SVPWM_Calculate(float phase_a, float phase_b, float phase_c,     // 使用最大最小值共模注入法计算线性区SVPWM
-                            float modulation, float *duty_a,
+                            float modulation_a, float modulation_b,
+                            float modulation_c, float *duty_a,
                             float *duty_b, float *duty_c)
 {
-    float ref_a = modulation * sinf(phase_a);                               // 生成保持原有幅值标定的A相基波参考
-    float ref_b = modulation * sinf(phase_b);                               // 生成保持当前B相超前120度的基波参考
-    float ref_c = modulation * sinf(phase_c);                               // 生成保持当前C相滞后120度的基波参考
+    float ref_a = modulation_a * sinf(phase_a);                             // 生成叠加A相平衡补偿后的基波参考
+    float ref_b = modulation_b * sinf(phase_b);                             // 生成叠加B相平衡补偿后的基波参考
+    float ref_c = modulation_c * sinf(phase_c);                             // 生成叠加C相平衡补偿后的基波参考
     float sv_max = ref_a;                                                    // 初始化三相参考最大值
     float sv_min = ref_a;                                                    // 初始化三相参考最小值
     float sv_offset;                                                         // 保存SVPWM零序共模偏置
@@ -755,6 +816,39 @@ static void SVPWM_Calculate(float phase_a, float phase_b, float phase_c,     // 
     else if(*duty_c < 0.0f) *duty_c = 0.0f;                                // 防止异常调制度导致C相比较值越界
 }
 
+static void PhaseBalance_Calculate(float ua_rms, float ub_rms, float uc_rms,// 计算不改变公共调制度的三相独立幅值补偿
+                                   float *trim_a, float *trim_b,
+                                   float *trim_c)
+{
+    float phase_average = (ua_rms + ub_rms + uc_rms) * 0.3333333f;          // 以三相平均有效值作为平衡目标
+    float trim_mean;                                                         // 保存三相补偿均值以强制零和
+    float abs_a, abs_b, abs_c;                                              // 保存补偿绝对值
+    float max_abs;                                                           // 保存三相最大补偿绝对值
+    float trim_scale;                                                        // 同比例缩放因子，避免独立削顶破坏零和
+
+    *trim_a = PHASE_BALANCE_KP * (phase_average - ua_rms);                  // 电压偏低的相增加调制度
+    *trim_b = PHASE_BALANCE_KP * (phase_average - ub_rms);
+    *trim_c = PHASE_BALANCE_KP * (phase_average - uc_rms);
+    trim_mean = (*trim_a + *trim_b + *trim_c) * 0.3333333f;                 // 去除浮点计算及采样造成的公共分量
+    *trim_a -= trim_mean;
+    *trim_b -= trim_mean;
+    *trim_c -= trim_mean;
+
+    abs_a = (*trim_a >= 0.0f) ? *trim_a : -*trim_a;                         // 不依赖库函数计算绝对值，缩短ISR路径
+    abs_b = (*trim_b >= 0.0f) ? *trim_b : -*trim_b;
+    abs_c = (*trim_c >= 0.0f) ? *trim_c : -*trim_c;
+    max_abs = abs_a;
+    if(abs_b > max_abs) max_abs = abs_b;
+    if(abs_c > max_abs) max_abs = abs_c;
+    if(max_abs > PHASE_BALANCE_TRIM_LIMIT)                                  // 任一相超过1%时三相同比例收缩
+    {
+        trim_scale = PHASE_BALANCE_TRIM_LIMIT / max_abs;
+        *trim_a *= trim_scale;
+        *trim_b *= trim_scale;
+        *trim_c *= trim_scale;
+    }
+}
+
 //******************* PIDa：三相输出电压环 *******************//
 void PIDa_Init(void)                                                        // 初始化逆变输出电压控制参数
 {
@@ -762,12 +856,9 @@ void PIDa_Init(void)                                                        // �
     pida.ref = 0;                                                           // 初始化控制器参考值
     pida.Err = 0;                                                           // 计算或清零当前控制误差
     pida.Err_last = 0;                                                      // 保存或清零上一拍误差
-    pida.Kp = 0.01;                                                         // 设置比例系数
-    pida.Ki = 0.005;                                                        // 设置积分系数
-    pida.Kd = 0;                                                            // 设置微分系数
+    pida.Kp = 0.025;                                                         // 设置比例系数
+    pida.Ki = 0.010;                                                        // 设置积分系数
     pida.result = 0;                                                        // 计算或清零控制器当前输出
-    pida.result_last = 0;                                                   // 保存或清零控制器上一拍输出
-    pida.Integral = 0;                                                      // 更新或清零控制器积分状态
 }
 
 float PIDa_Cal(float u)                                                     // 计算逆变调制分母增量
@@ -776,34 +867,7 @@ float PIDa_Cal(float u)                                                     // �
     pida.Err = pida.Xin - pida.ref;                                         // 计算或清零当前控制误差
     pida.result = pida.Kp * (pida.Err - pida.Err_last) + pida.Ki * pida.Err; // 计算或清零控制器当前输出
     pida.Err_last = pida.Err;                                               // 保存或清零上一拍误差
-    pida.result_last = pida.result;                                         // 保存或清零控制器上一拍输出
     if(fabsf(pida.Err) > 0.01f) return pida.result;                         // 输出误差超出死区时返回调节增量
-    return 0;                                                               // 误差位于死区时返回零增量
-}
-
-//******************* PIDc：保留控制器 *******************//
-void PIDc_Init(void)                                                        // 初始化备用PID参数
-{
-    pidc.Xin = 0;                                                           // 初始化或更新控制器测量输入
-    pidc.ref = 0;                                                           // 初始化控制器参考值
-    pidc.Err = 0;                                                           // 计算或清零当前控制误差
-    pidc.Err_last = 0;                                                      // 保存或清零上一拍误差
-    pidc.Kp = 0.001;                                                        // 设置比例系数
-    pidc.Ki = 0.00001;                                                      // 设置积分系数
-    pidc.Kd = 0;                                                            // 设置微分系数
-    pidc.result = 0;                                                        // 计算或清零控制器当前输出
-    pidc.result_last = 0;                                                   // 保存或清零控制器上一拍输出
-    pidc.Integral = 0;                                                      // 更新或清零控制器积分状态
-}
-
-float PIDc_Cal(float u)                                                     // 计算备用PID输出
-{
-    pidc.Xin = u;                                                           // 初始化或更新控制器测量输入
-    pidc.Err = pidc.ref - pidc.Xin;                                         // 计算或清零当前控制误差
-    pidc.result = pidc.Kp * (pidc.Err - pidc.Err_last) + pidc.Ki * pidc.Err + pidc.result_last; // 计算或清零控制器当前输出
-    pidc.Err_last = pidc.Err;                                               // 保存或清零上一拍误差
-    pidc.result_last = pidc.result;                                         // 保存或清零控制器上一拍输出
-    if(fabsf(pidc.Err) > 0.01f) return pidc.result;                         // 备用控制器误差超出死区时返回输出
     return 0;                                                               // 误差位于死区时返回零增量
 }
 
@@ -980,13 +1044,6 @@ void Init_KEY(void)                                                         // �
     GpioCtrlRegs.GPBPUD.bit.GPIO39 = 0;                                     // 使能KEY6对应GPIO39内部上拉
 
     EDIS;                                                                   // 重新禁止访问受保护寄存器
-}
-
-//******************* 保留自2025源码、当前未启用的ePWM1中断 *******************//
-__interrupt void epwm1_isr(void)                                            // 保留的ePWM1中断服务函数
-{
-    EPwm1Regs.ETCLR.bit.INT = 1;                                            // 清除ePWM1中断标志
-    PieCtrlRegs.PIEACK.all = PIEACK_GROUP3;                                 // 应答PIE第3组中断
 }
 
 //******************* PWM安全控制辅助函数 *******************//
