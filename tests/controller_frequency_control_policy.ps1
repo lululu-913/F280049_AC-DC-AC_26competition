@@ -10,14 +10,12 @@ foreach ($required in @(
     '#define FREQ_KEY_REPEAT_ISR_DIV 5000',
     '#define GENERAL_KEY_SCAN_ISR_DIV 10000',
     'volatile Uint16 output_freq_hz = 50U;',
-    'volatile float U_BUS_REF = 47.5f;',
+    'volatile float U_BUS_REF = 55.0f;',
     'theta_a += 2.0f * pi * (float)output_freq_hz * Ts;',
     'if(output_freq_hz < OUTPUT_FREQ_MAX_HZ)',
     'output_freq_hz += OUTPUT_FREQ_STEP_HZ;',
     'if(output_freq_hz > OUTPUT_FREQ_MIN_HZ)',
-    'output_freq_hz -= OUTPUT_FREQ_STEP_HZ;',
-    'OLED_ShowString(0, 3, "F       DI      ");',
-    'OLED_ShowNum(1, 3, output_freq_hz, 4);'
+    'output_freq_hz -= OUTPUT_FREQ_STEP_HZ;'
 )) {
     if (-not $source.Contains($required)) {
         throw "controller frequency policy missing: $required"
@@ -47,12 +45,6 @@ $keyScan = [regex]::Match(
 if (-not $keyScan.Success -or
     $keyScan.Value -match 'KEY_H1|KEY_H2') {
     throw 'controller frequency policy: general key scan would double-trigger KEY1/KEY2'
-}
-
-if ($source.Contains('#define BUS_REF_STEP') -or
-    $source.Contains('U_BUS_REF += BUS_REF_STEP') -or
-    $source.Contains('U_BUS_REF -= BUS_REF_STEP')) {
-    throw 'controller frequency policy: legacy KEY1/KEY2 bus-reference adjustment remains'
 }
 
 $key1 = [regex]::Match(

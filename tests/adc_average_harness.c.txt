@@ -1,0 +1,72 @@
+#include <stdint.h>
+
+typedef uint16_t Uint16;
+typedef uint32_t Uint32;
+
+#include "../adc_average.h"
+
+static int FloatEqual(float left, float right)
+{
+    float difference = left - right;
+    if(difference < 0.0f)
+        difference = -difference;
+    return difference < 0.0001f;
+}
+
+int main(void)
+{
+    ADC_AverageState state = {0UL, 0U, 0U, 0.0f};
+    ADC_AverageState first = {0UL, 0U, 0U, 0.0f};
+    ADC_AverageState second = {0UL, 0U, 0U, 0.0f};
+    Uint32 index;
+
+    for(index = 0UL; index < 5999UL; index++)
+    {
+        if(!FloatEqual(ADC_Average_Update(&state, 100U, 6000U), 0.0f))
+            return 1;
+    }
+    if((state.count != 5999U) ||
+       !FloatEqual(ADC_Average_Update(&state, 100U, 6000U), 100.0f) ||
+       (state.count != 0U))
+        return 2;
+
+    if(!FloatEqual(ADC_Average_Update(&state, 200U, 6000U), 100.0f) ||
+       (state.count != 1U) || (state.sum != 200UL))
+        return 3;
+
+    if(!FloatEqual(ADC_Average_Update(&state, 999U, 0U), 100.0f) ||
+       (state.count != 1U) || (state.sum != 200UL))
+        return 4;
+
+    state.sum = 20UL;
+    state.count = 2U;
+    state.window = 4U;
+    state.average = 0.0f;
+    if(!FloatEqual(ADC_Average_Update(&state, 10U, 2U), 0.0f) ||
+       (state.sum != 10UL) || (state.count != 1U) || (state.window != 2U))
+        return 5;
+    if(!FloatEqual(ADC_Average_Update(&state, 14U, 2U), 12.0f))
+        return 6;
+
+    ADC_Average_Update(&first, 10U, 2U);
+    ADC_Average_Update(&second, 30U, 3U);
+    if(!FloatEqual(ADC_Average_Update(&first, 14U, 2U), 12.0f) ||
+       !FloatEqual(ADC_Average_Update(&second, 30U, 3U), 0.0f))
+        return 7;
+    if(!FloatEqual(ADC_Average_Update(&second, 30U, 3U), 30.0f))
+        return 8;
+
+    state.sum = 0UL;
+    state.count = 0U;
+    state.window = 0U;
+    state.average = 0.0f;
+    for(index = 0UL; index < 65535UL; index++)
+        ADC_Average_Update(&state, 65535U, 65535U);
+    if(!FloatEqual(state.average, 65535.0f))
+        return 9;
+
+    if(!FloatEqual(ADC_Average_Update((ADC_AverageState *)0, 1U, 1U), 0.0f))
+        return 10;
+
+    return 0;
+}

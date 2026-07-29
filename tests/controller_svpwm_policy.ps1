@@ -24,8 +24,8 @@ Assert-Contains '\*duty_b\s*=\s*0\.5f\s*\+\s*ref_b\s*\+\s*sv_offset' `
     'B-phase duty does not include the SVPWM common-mode offset.'
 Assert-Contains '\*duty_c\s*=\s*0\.5f\s*\+\s*ref_c\s*\+\s*sv_offset' `
     'C-phase duty does not include the SVPWM common-mode offset.'
-Assert-Contains 'SVPWM_Calculate\s*\(\s*theta_a\s*,\s*theta_b\s*,\s*theta_c\s*,\s*inverter_soft_gain\s*/\s*M' `
-    'The inverter ISR does not call SVPWM with the existing phases and modulation scale.'
+Assert-Contains 'SVPWM_Calculate\s*\(\s*theta_a\s*,\s*theta_b\s*,\s*theta_c\s*,\s*modulation_a\s*,\s*modulation_b\s*,\s*modulation_c' `
+    'The inverter ISR does not call SVPWM with the existing phases and per-phase modulation scales.'
 Assert-Contains 'theta_b\s*=\s*theta_a\s*\+\s*2\.0944f' `
     'The existing B-leading phase sequence was not preserved.'
 Assert-Contains 'theta_c\s*=\s*theta_a\s*-\s*2\.0944f' `
