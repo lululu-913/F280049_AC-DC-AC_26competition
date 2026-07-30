@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 $controllerPath = Join-Path $PSScriptRoot '..\controller.c'
 $source = Get-Content -Raw -LiteralPath $controllerPath
 
-if ($source -notmatch '#define\s+BUS_OVERVOLTAGE_LIMIT\s+70\.0f') {
-    throw 'Bus overvoltage threshold must remain 70.0V.'
+if ($source -notmatch '#define\s+BUS_OVERVOLTAGE_LIMIT\s+77\.0f') {
+    throw 'Bus overvoltage threshold must remain 77.0V.'
 }
 
 if ($source -notmatch '#define\s+BUS_OVERVOLTAGE_CONFIRM_SAMPLES\s+40U') {
@@ -32,7 +32,7 @@ $confirmationBlock = [regex]::Match(
     'if\s*\(\s*bus_overvoltage_count\s*>=\s*BUS_OVERVOLTAGE_CONFIRM_SAMPLES\s*\)\s*' +
     '\{.*?PWM_TripRectifier\s*\(\s*\)\s*;.*?flag\s*=\s*2\s*;\s*\}')
 if (-not $confirmationBlock.Success) {
-    throw 'F2 must use saturating consecutive counting, reset below 70V, and trip only after count 40.'
+    throw 'F2 must use saturating consecutive counting, reset below 77V, and trip only after count 40.'
 }
 
 $protectionRegion = [regex]::Match(
@@ -48,4 +48,4 @@ if ([regex]::Matches($protectionRegion.Value, 'U_bus\s*>=\s*BUS_OVERVOLTAGE_LIMI
     throw 'A parallel single-sample overvoltage path is not allowed.'
 }
 
-Write-Output 'PASS: F2 requires 2ms of consecutive samples at or above 70V.'
+Write-Output 'PASS: F2 requires 2ms of consecutive samples at or above 77V.'

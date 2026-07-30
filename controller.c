@@ -75,7 +75,6 @@ static void PhaseBalance_Calculate(float ua_rms, float ub_rms, float uc_rms,// �
 #define KEY_UNPRESS 0                                                       // 定义无按键返回码
 int key = 0;                                                                // 保存当前按键扫描结果
 int N_key = 0;                                                              // KEY3～KEY6原500ms扫描分频计数器
-int N_freq_key = 0;                                                         // KEY1/KEY2频率调节250ms重复分频计数器
 
 //********** Flash运行段变量 **********//
 #ifdef _FLASH                                                               // 仅在Flash构建时启用RAM函数段复制
@@ -101,22 +100,24 @@ pidsettings pida;                                                           // �
 
 //********** 基础控制变量 **********//
 // F280049系统时钟为100MHz。
-// 逆变侧保持20kHz SVPWM；整流侧10kHz桥臂载波，单极性倍频后差模等效20kHz。
-// ADC由ePWM4在计数零点/周期点同步触发，控制与采样频率均为20kHz。
+// 逆变侧保持20kHz SVPWM；整流侧20kHz桥臂载波，单极性倍频后差模等效40kHz。
+// ADC由ePWM4在计数周期点同步触发一次，控制与采样频率仍保持20kHz。
 #define INVERTER_EPWM_TBPRD  2500                                           // 100MHz上下计数时对应20kHz逆变PWM
 #define INVERTER_PWM_RELEASE_WAIT_ISR 2U                                    // 20kHz控制ISR等待2拍，确保逆变CMPA完成装载后再释放Trip
-#define RECTIFIER_EPWM_TBPRD 5000                                          // 100MHz上下计数时对应10kHz整流桥臂载波（单极性等效20kHz）
+#define RECTIFIER_EPWM_TBPRD 2500                                           // 100MHz上下计数时对应20kHz整流桥臂载波（单极性等效40kHz）
 #define pi 3.1415926f                                                       // 定义单精度圆周率常量
 #define OUTPUT_FREQ_LOW_HZ 30.0f                                            // KEY2直接选择的低档输出频率
 #define OUTPUT_FREQ_HIGH_HZ 60.0f                                           // KEY1直接选择的高档输出频率
 #define OUTPUT_FREQ_RAMP_STEP_HZ 0.00151f                                   // 补偿单精度累加误差，30Hz全量切换约0.993s并保证1s内完成
-#define FREQ_KEY_SCAN_ISR_DIV 100                                            // KEY1/KEY2每5ms扫描一次，保证按键到斜坡完成不超过1s
+
 #define GENERAL_KEY_SCAN_ISR_DIV 10000                                      // KEY3～KEY6保持原500ms扫描与重复周期
 /////输入电压、电流和母线保护/////
 #define INPUT_VOLTAGE_MAX_RMS 36.0f                                        // 单相输入电压有效值上限
 #define INPUT_CURRENT_PK_MAX 9.0f                                           // 满功率时限制整流输入电流参考峰值为9.00A
-#define INPUT_OVERCURRENT_LIMIT 9.0f                                        // 设置整流输入瞬时软件过流保护阈值为9A
-#define BUS_OVERVOLTAGE_LIMIT 77.0f                                         // 70V过压保护
+#define INPUT_OVERCURRENT_LIMIT 10.0f                                        // 设置整流输入瞬时软件过流保护阈值为10A
+#define INPUT_OVERCURRENT_CONFIRM_SAMPLES 3U                                // 20kHz下连续3个过流样本才确认F1，最迟约150us
+#define BUS_OVERVOLTAGE_LIMIT 77.0f                                         // 母线软件过压阈值为77V
+#define BUS_OVERVOLTAGE_CONFIRM_SAMPLES 40U                                 // 20kHz下连续超压2ms才确认F2，滤除单次采样尖峰
 //////母线外环变化率及归一化下限/////
 #define BUS_CURRENT_SLEW_UP_STEP 0.050f                                     // 每10ms允许外环电流幅值增加0.050A，实现约5.0A/s软启动
 #define BUS_CURRENT_SLEW_DOWN_STEP 0.060f                                   // 每10ms允许外环电流幅值减小0.060A，实现约6.0A/s快速降流
@@ -131,13 +132,13 @@ pidsettings pida;                                                           // �
 #define RECTIFIER_FEEDFORWARD_GAIN 0.80f                                     // 叠加1.00倍输入电压前馈
 #define RECTIFIER_MODULATION_LIMIT 0.98f                                    // 将单极性调制量Di限制在正负0.98以内
 
-#define BUS_REF_HEADROOM_VOLTAGE 2.5f                                       // 母线目标至少高于输入电压峰值2.5V（功率减半）
-#define BUS_REF_MAX_VOLTAGE 60.0f                                           // 母线目标上限为60V
+#define BUS_REF_MIN_VOLTAGE 45.0f                                           // 母线参考下限为45V
+#define BUS_REF_MAX_VOLTAGE 63.0f                                           // 母线参考上限为63V
 
 #define INVERTER_SOFT_GAIN_UP_STEP 0.02f                                    // 每10ms增加0.02，约0.5s完成逆变软启动
 #define INVERTER_SOFT_GAIN_DOWN_STEP 0.05f                                  // 每10ms减小0.05，约0.2s完成逆变软关断
 #define INVERTER_VOLTAGE_KP 0.025f                                         // 逆变输出电压环比例增益
-#define INVERTER_VOLTAGE_KI 0.010f                                         // 逆变输出电压环积分增益
+#define INVERTER_VOLTAGE_KI 0.015f                                         // 逆变输出电压环积分增益
 #define INVERTER_VOLTAGE_ERROR_DEADBAND 0.01f                              // 逆变输出电压环误差死区
 #define INVERTER_MODULATION_DIVISOR_INITIAL 2.1044f                         // 55V母线、32Vrms线电压满功率运行时的调制分母初值
 #define INVERTER_MODULATION_DIVISOR_MIN 1.8f                               // 逆变调制分母下限
@@ -146,8 +147,8 @@ pidsettings pida;                                                           // �
 #define OUTPUT_COMMON_IIR_ALPHA 0.00624f                                    // 20kHz下约20Hz公共三相电压平方滤波
 #define OUTPUT_PHASE_IIR_ALPHA 0.000628f                                    // 20kHz下约2Hz单相电压平方滤波，抑制100Hz分量
 #define BUS_FEEDFORWARD_IIR_ALPHA 0.086f                                    // 20kHz下约300Hz母线前馈滤波，跟踪100Hz纹波
-#define BUS_FEEDFORWARD_GAIN_MIN 0.80f                                      // 母线前馈最小增益，限制采样异常造成的突降
-#define BUS_FEEDFORWARD_GAIN_MAX 1.30f                                      // 母线前馈最大增益，限制欠压时调制度突升
+#define BUS_FEEDFORWARD_GAIN_MIN 0.85f                                      // 母线前馈最小增益，限制采样异常造成的突降
+#define BUS_FEEDFORWARD_GAIN_MAX 1.15f                                      // 母线前馈最大增益，限制欠压时调制度突升
 #define INVERTER_MODULATION_LIMIT 0.56f                                     // SVPWM公共调制度限幅，含1%平衡补偿仍在线性区
 #define PHASE_BALANCE_KP 0.01f                                              // 每相有效值误差1V对应1%幅值补偿
 #define PHASE_BALANCE_TRIM_LIMIT 0.01f                                      // 每相独立补偿限制在正负1%
@@ -156,10 +157,11 @@ pidsettings pida;                                                           // �
 #define OLED_REFRESH_DIVIDER 1000                                           // 20kHz中断分频1000次，每50ms请求刷新一行OLED
 
 float U_REF = 36.0f;                                                        // 单相输入额定电压为36Vrms
-volatile float U_BUS_REF = 55.0f;                                           // 直流母线目标电压
+volatile float U_BUS_REF = 54.0f;                                           // 直流母线上电目标电压为54V
 volatile float U_OUT_REF = 18.4752f;                                        // 三相相电压目标为18.4752Vrms，对应线电压32Vrms（满功率）
-volatile float output_freq_target_hz = OUTPUT_FREQ_HIGH_HZ;                 // KEY1/KEY2选择的目标频率，分别为60Hz和30Hz
+volatile float output_freq_target_hz = OUTPUT_FREQ_HIGH_HZ;                 // KEY2选择的目标频率，在60Hz和30Hz之间切换
 volatile float output_freq_actual_hz = OUTPUT_FREQ_HIGH_HZ;                 // 实际用于相位推进的频率，按1秒斜坡跟踪目标值
+volatile int step_mode = 0;                                                  // KEY1切换：0=母线调压模式，1=输出调压模式
 
 volatile int rectifier_enable = 0;                                          // 整流独立模式命令：0被动整流、1主动整流
 volatile int inverter_enable = 0;                                           // 逆变独立模式命令：0请求关断、1请求运行
@@ -173,6 +175,8 @@ int inverter_soft_stop_active = 0;                                          // �
 float inverter_soft_gain = 0.0f;                                            // 逆变三相正弦幅值系数：0完全降幅、1正常输出
 volatile int rectifier_fault = 0;                                           // 整流局部故障锁存，不直接关断逆变侧
 volatile int system_fault = 0;                                              // 预留的全局故障锁存；母线过压不再置位该标志
+Uint16 bus_overvoltage_count = 0U;                                          // 母线连续超压采样计数，任一正常采样立即清零
+Uint16 input_overcurrent_count = 0U;                                        // 主动整流连续过流采样计数，任一正常采样立即清零
 int oled_row = 0;                                                           // 保存下一次需要刷新的OLED行号
 int N_oled = 0;                                                             // OLED刷新请求的20kHz分频计数器
 volatile int oled_refresh_request = 1;                                      // OLED按行刷新请求标志，上电后先请求刷新第0行
@@ -309,10 +313,9 @@ void main(void)                                                             // �
             oled_refresh_request = 0;                                       // 先清除请求，避免连续占用后台执行时间
             OLED_output();                                                  // 每次只刷新一行固定变量界面
         }
-        if(U_BUS_REF > BUS_REF_MAX_VOLTAGE) U_BUS_REF = BUS_REF_MAX_VOLTAGE; // 限制母线目标不超过31.5V（功率减半）
-        if(U_BUS_REF < (1.4142f * INPUT_VOLTAGE_MAX_RMS + BUS_REF_HEADROOM_VOLTAGE)) // 按输入上限保证升压裕量
-            U_BUS_REF = 1.4142f * INPUT_VOLTAGE_MAX_RMS + BUS_REF_HEADROOM_VOLTAGE; // 输入上限时仍保留约2.5V调制裕量（功率减半）
-        if(U_OUT_REF > OUTPUT_PHASE_REF_MAX_RMS) U_OUT_REF = OUTPUT_PHASE_REF_MAX_RMS; // 限制三相输出相电压目标上限
+        if(U_BUS_REF > BUS_REF_MAX_VOLTAGE) U_BUS_REF = BUS_REF_MAX_VOLTAGE; // 将母线目标上限限制为63V
+        if(U_BUS_REF < BUS_REF_MIN_VOLTAGE) U_BUS_REF = BUS_REF_MIN_VOLTAGE; // 将母线目标下限限制为45V
+       if(U_OUT_REF > OUTPUT_PHASE_REF_MAX_RMS) U_OUT_REF = OUTPUT_PHASE_REF_MAX_RMS; // 限制三相输出相电压目标上限
         if(U_OUT_REF < 1) U_OUT_REF = 1;                                    // 限制三相输出目标电压下限
         // 控制器参考值在对应100Hz控制窗口内读取，避免主循环直接改写ISR内部状态。
     }
@@ -413,13 +416,31 @@ __interrupt void adcA1ISR(void)                                             // 2
        (rectifier_pwm_start_stage == 3) &&                                  // 仅主动整流PWM正式运行后启用F1，忽略二极管预充浪涌
        (fabsf(I_in) > INPUT_OVERCURRENT_LIMIT))                             // 检测输入瞬时电流是否超过9A软件保护阈值
     {
+        if(input_overcurrent_count < INPUT_OVERCURRENT_CONFIRM_SAMPLES)     // 饱和计数避免连续过流时变量回绕
+            input_overcurrent_count++;
+    }
+    else                                                                    // 正常电流或整流尚未运行时立即打断连续确认
+    {
+        input_overcurrent_count = 0U;
+    }
+    if(input_overcurrent_count >= INPUT_OVERCURRENT_CONFIRM_SAMPLES)        // 第3个连续过流样本确认F1，最迟约150us
+    {
         rectifier_enable = 0;                                               // 整流过流只撤销主动整流命令，不直接改变逆变运行命令
         rectifier_fault = 1;                                                // 锁存整流局部故障，等待KEY3重新确认启动
         rectifier_pwm_start_stage = 0;                                      // 清零整流PWM启动阶段
         PWM_TripRectifier();                                                // 立即Trip ePWM4/5并退回MOSFET体二极管被动整流
         flag = 1;                                                           // 记录输入过流故障
     }
-    if(U_bus >= BUS_OVERVOLTAGE_LIMIT)                                      // 每个控制周期检测母线是否超过70V软件保护阈值
+    if(U_bus >= BUS_OVERVOLTAGE_LIMIT)                                      // 超过77V时累计连续超压样本
+    {
+        if(bus_overvoltage_count < BUS_OVERVOLTAGE_CONFIRM_SAMPLES)         // 饱和计数避免长时间超压时变量回绕
+            bus_overvoltage_count++;
+    }
+    else                                                                    // 任一正常母线样本立即打断连续超压确认
+    {
+        bus_overvoltage_count = 0U;
+    }
+    if(bus_overvoltage_count >= BUS_OVERVOLTAGE_CONFIRM_SAMPLES)            // 连续超压2ms后才确认真实母线过压
     {
         rectifier_enable = 0;                                               // 母线过压时撤销主动整流运行命令
         rectifier_fault = 1;                                                // 将母线过压锁存为整流侧局部故障
@@ -566,8 +587,8 @@ __interrupt void adcA1ISR(void)                                             // 2
         if(Di > RECTIFIER_MODULATION_LIMIT) Di = RECTIFIER_MODULATION_LIMIT; // 保留原正向调制限幅
         else if(Di < -RECTIFIER_MODULATION_LIMIT) Di = -RECTIFIER_MODULATION_LIMIT; // 保留原负向调制限幅
         D1 = 0.5f * (1.0f + Di);                                            // ePWM4左桥臂占空比采用(1+Di)/2
-        EPwm4Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * D1);        // 更新整流左桥臂中心对齐比较值（10kHz载波）
-        EPwm5Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * 0.5f * (1.0f - Di)); // 更新整流右桥臂中心对齐比较值（10kHz载波）
+        EPwm4Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * D1);        // 更新整流左桥臂中心对齐比较值（20kHz载波）
+        EPwm5Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * 0.5f * (1.0f - Di)); // 更新整流右桥臂中心对齐比较值（20kHz载波）
         PWM_ReleaseRectifier();                                             // 独立完成ePWM4/5预装等待和Trip释放
     }
     else
@@ -720,14 +741,6 @@ __interrupt void adcA1ISR(void)                                             // 2
         theta_a = 0.0f;                                                     // 把A相输出相位复位到零点
         theta_b = 2.0944f;                                                  // 把B相输出相位复位到超前120度
         theta_c = 4.1888f;                                                  // 把C相输出相位复位到滞后120度的等效正角
-    }
-
-    N_freq_key++;                                                           // 独立累加KEY1/KEY2频率选择扫描分频计数
-    if(N_freq_key >= FREQ_KEY_SCAN_ISR_DIV)                                 // 每100个20kHz控制周期即5ms读取一次频率选择键
-    {
-        N_freq_key = 0;                                                     // 清零频率按键扫描分频计数
-        if(KEY_H1 == 0) KEY_Control(KEY1_PRESS);                            // KEY1按下时直接选择60Hz目标频率
-        else if(KEY_H2 == 0) KEY_Control(KEY2_PRESS);                       // KEY2按下时直接选择30Hz目标频率
     }
 
     N_key++;                                                                // 独立累加KEY3～KEY6通用按键扫描分频计数
@@ -941,10 +954,11 @@ void OLED_output(void)                                                      // �
             OLED_ShowFloat(10, 2, oled_out_value, 3);                       // O后显示当前三相输出等效相电压
             break;                                                          // 本次单行刷新结束
 
-        default:                                                            // 第3行显示逆变输出频率命令和带符号的整流调制量
-            OLED_ShowNum(1, 3, (int)(output_freq_actual_hz + 0.5f), 4);     // F后显示四舍五入的当前实际频率
-            OLED_ShowChar(10, 3, (oled_di_value < 0.0f) ? '-' : '+');       // DI后显式显示整流差模调制量快照符号
-            OLED_ShowFloat(11, 3, fabsf(oled_di_value), 3);                 // 符号后显示同一快照的0～0.95幅值
+        default:                                                            // 第3行显示输出频率和按键步进模式
+            OLED_ShowChar(0, 3, 'F');                                        // 频率标签
+            OLED_ShowNum(1, 3, (int)(output_freq_actual_hz + 0.5f), 2);     // 显示30或60
+            OLED_ShowChar(4, 3, 'M');                                        // 步进模式标签
+            OLED_ShowNum(5, 3, step_mode, 1);                               // 0=母线调压，1=输出调压
             break;                                                          // 本次单行刷新结束
     }
 
@@ -957,12 +971,15 @@ void KEY_Control(int key_value)                                             // �
 {
     switch(key_value)                                                       // 根据按键码选择对应操作
     {
-        case KEY1_PRESS:                                                    // KEY1直接选择60Hz输出频率
-            output_freq_target_hz = OUTPUT_FREQ_HIGH_HZ;                    // 实际频率随后以30Hz/s斜坡升至60Hz
+        case KEY1_PRESS:                                                    // KEY1切换步进模式
+            step_mode = (step_mode == 0) ? 1 : 0;                           // 0=母线调压(母线±0.5V)，1=输出调压(输出±0.1V)
             break;                                                          // 结束当前按键分支
 
-        case KEY2_PRESS:                                                    // KEY2直接选择30Hz输出频率
-            output_freq_target_hz = OUTPUT_FREQ_LOW_HZ;                     // 实际频率随后以30Hz/s斜坡降至30Hz
+        case KEY2_PRESS:                                                    // KEY2在60Hz与30Hz之间来回切换
+            if(output_freq_target_hz >= OUTPUT_FREQ_HIGH_HZ)                // 当前目标为60Hz
+                output_freq_target_hz = OUTPUT_FREQ_LOW_HZ;                 // 切换为30Hz
+            else                                                            // 当前目标为30Hz
+                output_freq_target_hz = OUTPUT_FREQ_HIGH_HZ;                // 切换为60Hz
             break;                                                          // 结束当前按键分支
 
         case KEY3_PRESS:                                                    // KEY3切换主动整流，并联锁保证逆变先启动
@@ -985,12 +1002,18 @@ void KEY_Control(int key_value)                                             // �
             }
             break;                                                          // 结束当前按键分支
 
-        case KEY4_PRESS:                                                    // KEY4增加母线电压目标值
-            U_BUS_REF += 1.0f;                                              // 每次扫描事件把母线目标增加1V
+        case KEY4_PRESS:                                                    // KEY4根据step_mode调节目标值
+            if(step_mode == 0)
+                U_BUS_REF += 0.5f;                                          // 母线调压模式：每次+0.5V
+            else
+                U_OUT_REF += 0.1f;                                          // 输出调压模式：每次+0.1V
             break;                                                          // 结束当前按键分支
 
-        case KEY5_PRESS:                                                    // KEY5减小母线电压目标值
-            U_BUS_REF -= 1.0f;                                              // 每次扫描事件把母线目标减小1V
+        case KEY5_PRESS:                                                    // KEY5根据step_mode调节目标值
+            if(step_mode == 0)
+                U_BUS_REF -= 0.5f;                                          // 母线调压模式：每次-0.5V
+            else
+                U_OUT_REF -= 0.1f;                                          // 输出调压模式：每次-0.1V
             break;                                                          // 结束当前按键分支
 
         case KEY6_PRESS:                                                    // KEY6切换三相逆变，关断时先停止主动整流
@@ -1023,20 +1046,34 @@ void KEY_Control(int key_value)                                             // �
 
 char KEY_Scan(char key_mode)                                                // 仿照07192140工程读取六个低电平有效按键
 {
+    static int key1_latched = 0;                                            // KEY1按下后锁存一次
+    static int key2_latched = 0;                                            // KEY2按下后锁存一次
     static int key3_latched = 0;                                            // KEY3按下后锁存一次，必须检测到松开才允许再次切换模式
     static int key6_latched = 0;                                            // KEY6按下后锁存一次，防止长按反复启停逆变
+    if(KEY_H1 != 0) key1_latched = 0;                                       // KEY1松开后解除锁存
+    if(KEY_H2 != 0) key2_latched = 0;                                       // KEY2松开后解除锁存
     if(KEY_H3 != 0) key3_latched = 0;                                       // KEY3松开后解除锁存，重新允许下一次按下事件
     if(KEY_H6 != 0) key6_latched = 0;                                       // KEY6松开后解除锁存，重新允许下一次按下事件
 
     if(key_mode == 0)                                                       // 当前调用使用模式0时依次检测六个按键
     {
+        if((KEY_H1 == 0) && (key1_latched == 0))                            // KEY1按下切换步进模式
+        {
+            key1_latched = 1;                                               // 锁存本次按下
+            return KEY1_PRESS;                                              // 每次完整按下与松开过程只返回一次KEY1事件
+        }
+        if((KEY_H2 == 0) && (key2_latched == 0))                            // KEY2按下切换输出频率
+        {
+            key2_latched = 1;                                               // 锁存本次按下
+            return KEY2_PRESS;                                              // 每次完整按下与松开过程只返回一次KEY2事件
+        }
         if((KEY_H3 == 0) && (key3_latched == 0))                            // KEY3本次按下尚未产生过模式切换事件
         {
             key3_latched = 1;                                               // 锁存本次按下，防止长按反复启停主动整流
             return KEY3_PRESS;                                              // 每次完整按下与松开过程只返回一次KEY3事件
         }
-        if(KEY_H4 == 0) return KEY4_PRESS;                                  // 长按KEY4时保持每500ms重复一次升压事件
-        if(KEY_H5 == 0) return KEY5_PRESS;                                  // 长按KEY5时保持每500ms重复一次降压事件
+        if(KEY_H4 == 0) return KEY4_PRESS;                                  // 长按KEY4时保持每500ms重复一次调节事件
+        if(KEY_H5 == 0) return KEY5_PRESS;                                  // 长按KEY5时保持每500ms重复一次调节事件
         if((KEY_H6 == 0) && (key6_latched == 0))                            // KEY6本次按下尚未产生过逆变模式切换
         {
             key6_latched = 1;                                               // 锁存本次KEY6按下直到检测到松开
@@ -1171,7 +1208,7 @@ void InitEPWM(void)                                                         // �
     EPWM1_Init();                                                           // 配置三相逆变A相ePWM
     EPWM2_Init();                                                           // 配置三相逆变B相ePWM
     EPWM3_Init();                                                           // 配置三相逆变C相ePWM，保持20kHz载波并关闭SOCA
-    EPWM4_Init();                                                           // 配置单相整流左桥臂ePWM及20kHz同步ADC触发
+    EPWM4_Init();                                                           // 配置20kHz单相整流左桥臂ePWM及20kHz同步ADC触发
     EPWM5_Init();                                                           // 配置单相整流右桥臂ePWM
     EPWM6_Init();                                                           // 配置未使用的ePWM6并保持关断
     PWM_ForceAllLow();                                                      // 立即将所有ePWM输出强制为低电平
@@ -1319,13 +1356,13 @@ void EPWM4_Init(void)                                                       // �
     EPwm4Regs.TBCTL.bit.PHSEN = TB_DISABLE;                                 // 配置相位同步装载功能
     EPwm4Regs.TBPHS.all = 0;                                                // 将同步相位偏移清零
     EPwm4Regs.TBCTR = 0;                                                    // 将时基计数器清零
-    EPwm4Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                   // 设置中心对齐PWM周期值（10kHz整流桥臂，单极性等效20kHz）
+    EPwm4Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                 // 设置中心对齐PWM周期值（20kHz整流桥臂，单极性等效40kHz）
     EPwm4Regs.TBCTL.bit.CTRMODE = TB_COUNT_UPDOWN;                          // 采用上下计数的中心对齐模式
     EPwm4Regs.TBCTL.bit.HSPCLKDIV = TB_DIV1;                                // 高速时基时钟不分频
     EPwm4Regs.TBCTL.bit.CLKDIV = TB_DIV1;                                   // 时基时钟不分频
     EPwm4Regs.CMPCTL.bit.SHDWAMODE = CC_SHADOW;                             // 使能CMPA影子寄存器
     EPwm4Regs.CMPCTL.bit.SHDWBMODE = CC_SHADOW;                             // 使能CMPB影子寄存器
-    EPwm4Regs.CMPCTL.bit.LOADAMODE = CC_CTR_ZERO_PRD;                           // 在计数器零点/周期点装载CMPA
+    EPwm4Regs.CMPCTL.bit.LOADAMODE = CC_CTR_ZERO;                            // 仅在计数器零点装载CMPA，保证完整载波周期占空比对称
     EPwm4Regs.CMPCTL.bit.LOADBMODE = CC_CTR_ZERO;                           // 在计数器归零时装载CMPB
     EPwm4Regs.CMPA.bit.CMPA = 0;                                            // 设置A路比较值
     EPwm4Regs.AQCTLA.bit.ZRO = AQ_SET;                                      // 计数器归零时将A路输出置高
@@ -1343,8 +1380,8 @@ void EPWM4_Init(void)                                                       // �
     EPwm4Regs.ETSEL.bit.INTEN = 0;                                          // 关闭未使用的ePWM中断请求
     EPwm4Regs.ETPS.bit.INTPRD = ET_1ST;                                     // 配置每次事件产生一次中断标志
     EPwm4Regs.ETSEL.bit.SOCAEN = 1;                                         // 使能ePWM4的ADC启动脉冲
-    EPwm4Regs.ETSEL.bit.SOCASEL = 3;                                        // 上下计数零点和周期点各触发一次，共20kHz
-    EPwm4Regs.ETPS.bit.SOCAPRD = 1;                                         // 每次零点/周期事件均产生SOCA
+    EPwm4Regs.ETSEL.bit.SOCASEL = 2;                                        // 20kHz载波仅在周期点触发一次，保持20kHz控制与采样
+    EPwm4Regs.ETPS.bit.SOCAPRD = 1;                                         // 每次周期点事件均产生SOCA
 }
 
 void EPWM5_Init(void)                                                       // 初始化整流右桥臂ePWM5
@@ -1364,13 +1401,13 @@ void EPWM5_Init(void)                                                       // �
     EPwm5Regs.TBCTL.bit.PHSDIR = TB_UP;                                    // 同步装载相位0后向上计数，严格跟随ePWM4同相载波
     EPwm5Regs.TBPHS.all = 0;                                                // 将同步相位偏移清零
     EPwm5Regs.TBCTR = 0;                                                    // 将时基计数器清零
-    EPwm5Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                   // 设置中心对齐PWM周期值（10kHz整流桥臂，跟随ePWM4同步）
+    EPwm5Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                 // 设置中心对齐PWM周期值（20kHz整流桥臂，跟随ePWM4同步）
     EPwm5Regs.TBCTL.bit.CTRMODE = TB_COUNT_UPDOWN;                          // 采用上下计数的中心对齐模式
     EPwm5Regs.TBCTL.bit.HSPCLKDIV = TB_DIV1;                                // 高速时基时钟不分频
     EPwm5Regs.TBCTL.bit.CLKDIV = TB_DIV1;                                   // 时基时钟不分频
     EPwm5Regs.CMPCTL.bit.SHDWAMODE = CC_SHADOW;                             // 使能CMPA影子寄存器
     EPwm5Regs.CMPCTL.bit.SHDWBMODE = CC_SHADOW;                             // 使能CMPB影子寄存器
-    EPwm5Regs.CMPCTL.bit.LOADAMODE = CC_CTR_ZERO_PRD;                           // 在计数器零点/周期点装载CMPA
+    EPwm5Regs.CMPCTL.bit.LOADAMODE = CC_CTR_ZERO;                            // 仅在计数器零点装载CMPA，保证完整载波周期占空比对称
     EPwm5Regs.CMPCTL.bit.LOADBMODE = CC_CTR_ZERO;                           // 在计数器归零时装载CMPB
     EPwm5Regs.CMPA.bit.CMPA = 0;                                            // 设置A路比较值
     EPwm5Regs.AQCTLA.bit.ZRO = AQ_SET;                                      // 计数器归零时将A路输出置高
