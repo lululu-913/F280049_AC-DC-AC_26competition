@@ -30,8 +30,8 @@ Assert-Contains 'theta_b\s*=\s*theta_a\s*\+\s*2\.0944f' `
     'The existing B-leading phase sequence was not preserved.'
 Assert-Contains 'theta_c\s*=\s*theta_a\s*-\s*2\.0944f' `
     'The existing C-lagging phase sequence was not preserved.'
-Assert-Contains 'if\s*\(\s*M\s*<=\s*1\.8f\s*\)\s*M\s*=\s*1\.8f' `
-    'The SVPWM modulation divisor lower limit must remain at the current 1.8 setting.'
+Assert-Contains 'if\s*\(\s*M\s*<=\s*INVERTER_MODULATION_DIVISOR_MIN\s*\)\s*M\s*=\s*INVERTER_MODULATION_DIVISOR_MIN' `
+    'The SVPWM modulation divisor lower limit must use its tuning macro.'
 
 if ($source -match 'CMPA\s*=\s*EPWM_TIMER_TBPRD\s*\*\s*inverter_soft_gain\s*\*\s*sinf') {
     throw 'Legacy direct sinusoidal CMPA assignment is still active.'

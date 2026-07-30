@@ -12,4 +12,6 @@ encoding//Debug/src/subdir_rules.mk=UTF-8
 encoding//Debug/src/subdir_vars.mk=UTF-8
 encoding//Debug/subdir_rules.mk=UTF-8
 encoding//Debug/subdir_vars.mk=UTF-8
+encoding//Debug/tests/subdir_rules.mk=UTF-8
+encoding//Debug/tests/subdir_vars.mk=UTF-8
 encoding/<project>=UTF-8

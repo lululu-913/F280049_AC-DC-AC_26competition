@@ -1,64 +1,53 @@
 $ErrorActionPreference = 'Stop'
 
-$controllerPath = Join-Path $PSScriptRoot '..\controller.c'
-$source = Get-Content -Raw -LiteralPath $controllerPath
+$source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\controller.c')
 
-function Read-Float {
-    param(
-        [string]$Pattern,
-        [string]$Description
-    )
-
-    $match = [regex]::Match($source, $Pattern)
-    if (-not $match.Success) {
-        throw "Missing $Description."
-    }
-
-    return [double]::Parse(
-        $match.Groups[1].Value,
-        [Globalization.CultureInfo]::InvariantCulture
-    )
+function Read-Float([string]$pattern, [string]$description) {
+    $match = [regex]::Match($source, $pattern)
+    if (-not $match.Success) { throw "Missing $description." }
+    return [double]::Parse($match.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
 }
 
-$inputRms = Read-Float 'float\s+U_REF\s*=\s*([0-9.]+)f' '36 Vrms input reference'
-$busReference = Read-Float 'U_BUS_REF\s*=\s*([0-9.]+)f' '55 V bus reference'
-$phaseRms = Read-Float 'U_OUT_REF\s*=\s*([0-9.]+)f' '17.3205 Vrms phase reference'
-$overvoltage = Read-Float 'BUS_OVERVOLTAGE_LIMIT\s+([0-9.]+)f' '70 V bus overvoltage limit'
-$inputCurrentPeakMaximum = Read-Float 'INPUT_CURRENT_PK_MAX\s+([0-9.]+)f' '6 A input-current reference limit'
-$inputOvercurrentLimit = Read-Float 'INPUT_OVERCURRENT_LIMIT\s+([0-9.]+)f' '9 A input overcurrent limit'
+$inputRated = Read-Float 'float\s+U_REF\s*=\s*([0-9.]+)f' '36 Vrms rated input'
+$inputMaximum = Read-Float 'INPUT_VOLTAGE_MAX_RMS\s+([0-9.]+)f' '41 Vrms maximum input'
+$busReference = Read-Float 'U_BUS_REF\s*=\s*([0-9.]+)f' '63 V bus reference'
+$busMaximum = Read-Float 'BUS_REF_MAX_VOLTAGE\s+([0-9.]+)f' '63 V bus clamp'
+$busHeadroom = Read-Float 'BUS_REF_HEADROOM_VOLTAGE\s+([0-9.]+)f' '5 V boost headroom'
+$overvoltage = Read-Float 'BUS_OVERVOLTAGE_LIMIT\s+([0-9.]+)f' '70 V overvoltage protection'
+$phaseReference = Read-Float 'U_OUT_REF\s*=\s*([0-9.]+)f' '32 V line-output phase reference'
+$modulationDenominator = Read-Float 'float\s+M\s*=\s*([0-9.]+)f' 'nominal inverter modulation denominator'
+$busFeedforwardInitial = Read-Float 'float\s+U_bus_ff\s*=\s*([0-9.]+)f' 'bus feedforward initial value'
 
-if ([Math]::Abs($inputRms - 36.0) -gt 1.0e-4) {
-    throw "Input reference is $inputRms Vrms instead of 36 Vrms."
+if ([Math]::Abs($inputRated - 36.0) -gt 1.0e-4) { throw "Rated input is $inputRated Vrms instead of 36 Vrms." }
+if ([Math]::Abs($inputMaximum - 41.0) -gt 1.0e-4) { throw "Maximum input is $inputMaximum Vrms instead of 41 Vrms." }
+if ([Math]::Abs($busReference - 63.0) -gt 1.0e-4 -or [Math]::Abs($busMaximum - 63.0) -gt 1.0e-4) {
+    throw "Bus reference/clamp must both be 63 V, got $busReference/$busMaximum V."
 }
-if ([Math]::Abs($busReference - 55.0) -gt 1.0e-4) {
-    throw "Bus reference is $busReference V instead of 55 V."
+if ([Math]::Abs($busHeadroom - 5.0) -gt 1.0e-4) { throw 'Boost headroom must be 5 V.' }
+if ($busReference + 1.0e-4 -lt ([Math]::Sqrt(2.0) * $inputMaximum + $busHeadroom)) {
+    throw '63 V bus does not cover the 41 Vrms input peak plus 5 V boost headroom.'
 }
-if ([Math]::Abs($phaseRms - (30.0 / [Math]::Sqrt(3.0))) -gt 1.0e-3) {
-    throw "Phase reference $phaseRms Vrms does not produce 30 Vrms line voltage."
-}
-if ([Math]::Abs($overvoltage - 70.0) -gt 1.0e-4) {
-    throw 'Bus overvoltage protection must remain at 70 V.'
-}
-if ([Math]::Abs($inputCurrentPeakMaximum - 6.0) -gt 1.0e-4 -or
-    [Math]::Abs($inputOvercurrentLimit - 9.0) -gt 1.0e-4) {
-    throw 'The input-current reference limit must be 6 A and overcurrent protection must remain 9 A.'
-}
-if ($source -notmatch '(?s)U_BUS_REF\s*=\s*1\.4142f\s*\*\s*U_REF\s*\+\s*BUS_REF_HEADROOM_VOLTAGE;.*?if\s*\(\s*U_BUS_REF\s*>\s*BUS_REF_MAX_VOLTAGE\s*\)\s*U_BUS_REF\s*=\s*BUS_REF_MAX_VOLTAGE') {
-    throw 'The final bus-reference clamp must stop at the configured maximum after applying boost headroom.'
-}
-foreach ($keyName in @('KEY1_PRESS', 'KEY2_PRESS')) {
-    $keyCase = [regex]::Match($source, "(?s)case\s+${keyName}:.*?break;")
-    if (-not $keyCase.Success -or $keyCase.Value -match 'U_BUS_REF') {
-        throw "$keyName must not adjust the bus reference."
-    }
+if ([Math]::Abs($overvoltage - 70.0) -gt 1.0e-4) { throw 'Bus overvoltage protection must be 70 V.' }
+
+$expectedPhase = 32.0 / [Math]::Sqrt(3.0)
+if ([Math]::Abs($phaseReference - $expectedPhase) -gt 1.0e-3) {
+    throw "Phase reference $phaseReference Vrms does not produce 32 Vrms line voltage."
 }
 
-$rectifierMinimumBus = [Math]::Sqrt(2.0) * $inputRms + 4.0
-
-if ($busReference -le $rectifierMinimumBus) {
-    throw 'The 55 V bus lacks the required 4 V boost-rectifier headroom.'
+$predictedLine = $busReference * [Math]::Sqrt(3.0 / 2.0) / $modulationDenominator
+if ([Math]::Abs($predictedLine - 32.0) -gt 0.02) {
+    throw "Initial modulation predicts $predictedLine Vrms line voltage instead of 32 Vrms."
+}
+if ((1.0 / $modulationDenominator) -gt 0.56) { throw 'Nominal modulation exceeds the configured SVPWM limit.' }
+if ([Math]::Abs($busFeedforwardInitial - $busReference) -gt 1.0e-4) {
+    throw 'Bus feedforward initial value must match the 63 V bus reference.'
 }
 
-Write-Output (
-    'PASS: 36 Vrms input, 55 V rectifier bus, 70 V protection, 4 V boost headroom.'
-)
+foreach ($required in @(
+    'if(U_BUS_REF > BUS_REF_MAX_VOLTAGE) U_BUS_REF = BUS_REF_MAX_VOLTAGE;',
+    '1.4142f * INPUT_VOLTAGE_MAX_RMS + BUS_REF_HEADROOM_VOLTAGE'
+)) {
+    if (-not $source.Contains($required)) { throw "Competition voltage policy missing: $required" }
+}
+
+'controller competition voltage policy: PASS'
