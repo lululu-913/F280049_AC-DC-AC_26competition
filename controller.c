@@ -9,8 +9,8 @@
  *   ePWM1/ePWM2/ePWM3：三相逆变 A/B/C 桥臂；
  *   ePWM4：单相整流左桥臂，上下管分别由ePWM4A/ePWM4B驱动；
  *   ePWM5：单相整流右桥臂，上下管分别由ePWM5A/ePWM5B驱动；
- *   ePWM6：未使用，始终强制输出低电平。
- * 该分配不同于原 F280049 AC-AC 工程的“ePWM1/2前级、ePWM4/5/6后级”分组；
+ *   ePWM6：已删除，GPIO10/11改为普通输出低电平。
+ * 该分配不同于原 F280049 AC-AC 工程的”ePWM1/2前级、ePWM4/5/6后级”分组；
  * 接通功率电路前必须核对PCB门极驱动接线。
  */
 
@@ -35,7 +35,6 @@ void EPWM2_Init(void);                                                      // �
 void EPWM3_Init(void);                                                      // 初始化ePWM3及SOCA触发
 void EPWM4_Init(void);                                                      // 初始化ePWM4
 void EPWM5_Init(void);                                                      // 初始化ePWM5
-void EPWM6_Init(void);                                                      // 初始化未使用的ePWM6
 
 void PLL1(float UI);                                                        // SOGI-PLL输入电压锁相计算
 void PID1_Init(void);                                                       // 初始化母线电压外环参数
@@ -100,11 +99,12 @@ pidsettings pida;                                                           // �
 
 //********** 基础控制变量 **********//
 // F280049系统时钟为100MHz。
-// 逆变侧保持20kHz SVPWM；整流侧20kHz桥臂载波，单极性倍频后差模等效40kHz。
-// ADC由ePWM4在计数周期点同步触发一次，控制与采样频率仍保持20kHz。
+// 逆变侧保持20kHz SVPWM；整流侧10kHz桥臂载波，单极性倍频后差模等效20kHz。
+// ADC改由ePWM3在计数零点同步触发，控制与采样频率仍保持20kHz。
 #define INVERTER_EPWM_TBPRD  2500                                           // 100MHz上下计数时对应20kHz逆变PWM
 #define INVERTER_PWM_RELEASE_WAIT_ISR 2U                                    // 20kHz控制ISR等待2拍，确保逆变CMPA完成装载后再释放Trip
-#define RECTIFIER_EPWM_TBPRD 2500                                           // 100MHz上下计数时对应20kHz整流桥臂载波（单极性等效40kHz）
+#define RECTIFIER_EPWM_TBPRD 5000                                           // 100MHz上下计数时对应10kHz整流桥臂载波（单极性等效20kHz）
+#define RECTIFIER_PWM_RELEASE_WAIT_ISR 2U                                   // 20kHz控制ISR等待2拍，确保10kHz整流CMPA完成归零装载后再释放Trip
 #define pi 3.1415926f                                                       // 定义单精度圆周率常量
 #define OUTPUT_FREQ_LOW_HZ 30.0f                                            // KEY2直接选择的低档输出频率
 #define OUTPUT_FREQ_HIGH_HZ 60.0f                                           // KEY1直接选择的高档输出频率
@@ -171,6 +171,7 @@ volatile int tag = 0;                                                       // �
 int inverter_pwm_start_stage = 0;                                           // 逆变PWM启动阶段：0关断、1预装、2待释放、3正常运行
 Uint16 inverter_pwm_release_wait = 0U;                                      // 逆变CMPA预装后的控制ISR等待计数
 int rectifier_pwm_start_stage = 0;                                          // 整流PWM启动阶段：0关断、1预装、2待释放、3正常运行
+Uint16 rectifier_pwm_release_wait = 0U;                                     // 整流CMPA预装后的20kHz控制ISR等待计数
 int inverter_soft_stop_active = 0;                                          // 逆变软关断状态：1时逐步把调制幅值降为零
 float inverter_soft_gain = 0.0f;                                            // 逆变三相正弦幅值系数：0完全降幅、1正常输出
 volatile int rectifier_fault = 0;                                           // 整流局部故障锁存，不直接关断逆变侧
@@ -268,8 +269,12 @@ void main(void)                                                             // �
     GpioCtrlRegs.GPAGMUX1.bit.GPIO7 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO7 = 1;   // 复用为ePWM4B
     GpioCtrlRegs.GPAGMUX1.bit.GPIO8 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO8 = 1;   // 复用为ePWM5A
     GpioCtrlRegs.GPAGMUX1.bit.GPIO9 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO9 = 1;   // 复用为ePWM5B
-    GpioCtrlRegs.GPAGMUX1.bit.GPIO10 = 0; GpioCtrlRegs.GPAMUX1.bit.GPIO10 = 1;  // GPIO10复用为ePWM6A（未使用）
-    GpioCtrlRegs.GPAGMUX1.bit.GPIO11 = 0; GpioCtrlRegs.GPAMUX1.bit.GPIO11 = 1;  // GPIO11复用为ePWM6B（未使用）
+    GpioCtrlRegs.GPAGMUX1.bit.GPIO10 = 0; GpioCtrlRegs.GPAMUX1.bit.GPIO10 = 0;  // GPIO10改为普通GPIO
+    GpioCtrlRegs.GPAGMUX1.bit.GPIO11 = 0; GpioCtrlRegs.GPAMUX1.bit.GPIO11 = 0;  // GPIO11改为普通GPIO
+    GpioCtrlRegs.GPADIR.bit.GPIO10 = 1;                                       // GPIO10方向为输出
+    GpioCtrlRegs.GPADIR.bit.GPIO11 = 1;                                       // GPIO11方向为输出
+    GpioDataRegs.GPACLEAR.bit.GPIO10 = 1;                                     // GPIO10输出低电平
+    GpioDataRegs.GPACLEAR.bit.GPIO11 = 1;                                     // GPIO11输出低电平
     AnalogSubsysRegs.DCDCCTL.bit.DCDCEN = 0;                                // 关闭芯片内部DC-DC以适配外部供电
     EDIS;                                                                   // 重新禁止访问受保护寄存器
 
@@ -376,23 +381,23 @@ void InitADCSOC(void)                                                       // �
     // 将F28069的SOC/通道关系分别映射到F280049的ADCA和ADCB。
     AdcaRegs.ADCSOC0CTL.bit.CHSEL = 0;                                      // SOC0选择ADCINA0，采集输入电压U_in
     AdcaRegs.ADCSOC0CTL.bit.ACQPS = 9;                                      // 设置ADC采样保持窗口为10个SYSCLK
-    AdcaRegs.ADCSOC0CTL.bit.TRIGSEL = 11;                                    // 选择ePWM4 SOCA作为硬件触发源
+    AdcaRegs.ADCSOC0CTL.bit.TRIGSEL = 9;                                     // 选择ePWM3 SOCA作为20kHz硬件触发源
 
     AdcaRegs.ADCSOC1CTL.bit.CHSEL = 1;                                      // SOC1选择ADCINA1，采集母线电压U_bus
     AdcaRegs.ADCSOC1CTL.bit.ACQPS = 9;                                      // 设置ADC采样保持窗口为10个SYSCLK
-    AdcaRegs.ADCSOC1CTL.bit.TRIGSEL = 11;                                    // 选择ePWM4 SOCA作为硬件触发源
+    AdcaRegs.ADCSOC1CTL.bit.TRIGSEL = 9;                                     // 选择ePWM3 SOCA作为20kHz硬件触发源
 
     AdcaRegs.ADCSOC2CTL.bit.CHSEL = 2;                                      // SOC2选择ADCINA2，采集输出线电压U_oab
     AdcaRegs.ADCSOC2CTL.bit.ACQPS = 9;                                      // 设置ADC采样保持窗口为10个SYSCLK
-    AdcaRegs.ADCSOC2CTL.bit.TRIGSEL = 11;                                    // 选择ePWM4 SOCA作为硬件触发源
+    AdcaRegs.ADCSOC2CTL.bit.TRIGSEL = 9;                                     // 选择ePWM3 SOCA作为20kHz硬件触发源
 
     AdcaRegs.ADCSOC3CTL.bit.CHSEL = 3;                                       // SOC3选择ADCINA3，采集输出线电压U_obc
     AdcaRegs.ADCSOC3CTL.bit.ACQPS = 9;                                      // 设置ADC采样保持窗口为10个SYSCLK
-    AdcaRegs.ADCSOC3CTL.bit.TRIGSEL = 11;                                    // 选择ePWM4 SOCA作为硬件触发源
+    AdcaRegs.ADCSOC3CTL.bit.TRIGSEL = 9;                                     // 选择ePWM3 SOCA作为20kHz硬件触发源
 
     AdcbRegs.ADCSOC0CTL.bit.CHSEL = 0;                                      // SOC0选择ADCINB0，采集输入电流I_in
     AdcbRegs.ADCSOC0CTL.bit.ACQPS = 9;                                      // 设置ADC采样保持窗口为10个SYSCLK
-    AdcbRegs.ADCSOC0CTL.bit.TRIGSEL = 11;                                    // 选择ePWM4 SOCA作为硬件触发源
+    AdcbRegs.ADCSOC0CTL.bit.TRIGSEL = 9;                                     // 选择ePWM3 SOCA作为20kHz硬件触发源
 
     // 逆变侧采用纯电压环，因此不再配置ADCB1～3三相电流采样。
     // EOC3是最后一个使用的ADCA结果，此时并行转换的ADCB RESULT0早已完成。
@@ -587,8 +592,8 @@ __interrupt void adcA1ISR(void)                                             // 2
         if(Di > RECTIFIER_MODULATION_LIMIT) Di = RECTIFIER_MODULATION_LIMIT; // 保留原正向调制限幅
         else if(Di < -RECTIFIER_MODULATION_LIMIT) Di = -RECTIFIER_MODULATION_LIMIT; // 保留原负向调制限幅
         D1 = 0.5f * (1.0f + Di);                                            // ePWM4左桥臂占空比采用(1+Di)/2
-        EPwm4Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * D1);        // 更新整流左桥臂中心对齐比较值（20kHz载波）
-        EPwm5Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * 0.5f * (1.0f - Di)); // 更新整流右桥臂中心对齐比较值（20kHz载波）
+        EPwm4Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * D1);        // 更新整流左桥臂中心对齐比较值（10kHz载波）
+        EPwm5Regs.CMPA.bit.CMPA = (Uint16)(RECTIFIER_EPWM_TBPRD * 0.5f * (1.0f - Di)); // 更新整流右桥臂中心对齐比较值（10kHz载波，差模等效20kHz）
         PWM_ReleaseRectifier();                                             // 独立完成ePWM4/5预装等待和Trip释放
     }
     else
@@ -1125,7 +1130,6 @@ static void PWM_ForceAllLow(void)                                           // �
     EPwm3Regs.TZFRC.bit.OST = 1;                                            // 从死区模块之后立即锁存关断逆变C相A/B输出
     EPwm4Regs.TZFRC.bit.OST = 1;                                            // 从死区模块之后立即锁存关断整流左桥臂A/B输出
     EPwm5Regs.TZFRC.bit.OST = 1;                                            // 从死区模块之后立即锁存关断整流右桥臂A/B输出
-    EPwm6Regs.TZFRC.bit.OST = 1;                                            // 锁存关断未使用的ePWM6 A/B输出
     EDIS;                                                                   // 重新禁止访问受保护寄存器
 }
 
@@ -1144,6 +1148,7 @@ static void PWM_TripRectifier(void)                                         // �
     EALLOW;                                                                 // 允许访问整流侧Trip Zone软件触发寄存器
     EPwm4Regs.TZFRC.bit.OST = 1;                                            // 立即锁存关断整流左桥臂A/B输出
     EPwm5Regs.TZFRC.bit.OST = 1;                                            // 立即锁存关断整流右桥臂A/B输出
+    rectifier_pwm_release_wait = 0U;                                        // 每次Trip后重新等待10kHz整流CMPA完成归零装载
     EDIS;                                                                   // 重新禁止访问受保护寄存器
 }
 
@@ -1181,20 +1186,25 @@ static void PWM_ReleaseRectifier(void)                                      // �
     EALLOW;                                                                 // 允许访问整流侧Trip Zone清除与软件触发寄存器
     if(rectifier_pwm_start_stage == 1)                                      // 第一拍仅把整流计算值写入CMPA影子寄存器
     {
-        rectifier_pwm_start_stage = 2;                                      // 等待下一次TBCTR归零装载ePWM4/5比较值
+        rectifier_pwm_release_wait = 0U;                                    // 从CMPA预装完成时开始计算等待拍数
+        rectifier_pwm_start_stage = 2;                                      // 等待10kHz载波归零装载ePWM4/5比较值
     }
-    else if(rectifier_pwm_start_stage == 2)                                 // 第二拍ISR到来时整流CMPA已经完成装载
+    else if(rectifier_pwm_start_stage == 2)                                 // CMPA预装后等待一个完整10kHz整流PWM周期
     {
-        EPwm4Regs.TZCLR.bit.OST = 1;                                        // 解除整流左桥臂One-Shot Trip关断锁存
-        EPwm5Regs.TZCLR.bit.OST = 1;                                        // 解除整流右桥臂One-Shot Trip关断锁存
-        rectifier_pwm_start_stage = 3;                                      // 标记主动整流PWM已经进入正常运行阶段
+        if(rectifier_pwm_release_wait < RECTIFIER_PWM_RELEASE_WAIT_ISR)      // 使用饱和计数避免等待变量回绕
+            rectifier_pwm_release_wait++;                                   // 20kHz ISR累计两拍即100us
+        if(rectifier_pwm_release_wait >= RECTIFIER_PWM_RELEASE_WAIT_ISR)     // 确认已跨过一次10kHz载波归零装载
+        {
+            EPwm4Regs.TZCLR.bit.OST = 1;                                    // 解除整流左桥臂One-Shot Trip关断锁存
+            EPwm5Regs.TZCLR.bit.OST = 1;                                    // 解除整流右桥臂One-Shot Trip关断锁存
+            rectifier_pwm_start_stage = 3;                                  // 标记主动整流PWM已经进入正常运行阶段
+        }
     }
     else if(rectifier_pwm_start_stage != 3)                                 // 非法阶段值下不允许主动整流输出
     {
         EPwm4Regs.TZFRC.bit.OST = 1;                                        // 异常状态保持整流左桥臂关断
         EPwm5Regs.TZFRC.bit.OST = 1;                                        // 异常状态保持整流右桥臂关断
     }
-    EPwm6Regs.TZFRC.bit.OST = 1;                                            // ePWM6在全部模式下始终保持Trip关断
     EDIS;                                                                   // 重新禁止访问受保护寄存器
 }
 
@@ -1207,10 +1217,9 @@ void InitEPWM(void)                                                         // �
 
     EPWM1_Init();                                                           // 配置三相逆变A相ePWM
     EPWM2_Init();                                                           // 配置三相逆变B相ePWM
-    EPWM3_Init();                                                           // 配置三相逆变C相ePWM，保持20kHz载波并关闭SOCA
-    EPWM4_Init();                                                           // 配置20kHz单相整流左桥臂ePWM及20kHz同步ADC触发
-    EPWM5_Init();                                                           // 配置单相整流右桥臂ePWM
-    EPWM6_Init();                                                           // 配置未使用的ePWM6并保持关断
+    EPWM3_Init();                                                           // 配置三相逆变C相ePWM，保持20kHz载波并提供20kHz ADC SOCA
+    EPWM4_Init();                                                           // 配置10kHz单相整流左桥臂ePWM
+    EPWM5_Init();                                                           // 配置10kHz单相整流右桥臂ePWM，差模等效20kHz
     PWM_ForceAllLow();                                                      // 立即将所有ePWM输出强制为低电平
 }
 
@@ -1335,7 +1344,7 @@ void EPWM3_Init(void)                                                       // �
     EPwm3Regs.ETSEL.bit.INTSEL = ET_CTR_ZERO;                               // 选择计数器归零作为ePWM中断事件
     EPwm3Regs.ETSEL.bit.INTEN = 0;                                          // 关闭未使用的ePWM中断请求
     EPwm3Regs.ETPS.bit.INTPRD = ET_1ST;                                     // 配置每次事件产生一次中断标志
-    EPwm3Regs.ETSEL.bit.SOCAEN = 0;                                         // 禁用ePWM3的ADC启动脉冲
+    EPwm3Regs.ETSEL.bit.SOCAEN = 1;                                         // 使能ePWM3的20kHz ADC启动脉冲
     EPwm3Regs.ETSEL.bit.SOCASEL = 1;                                        // 选择TBCTR等于零作为ADC采样时刻
     EPwm3Regs.ETPS.bit.SOCAPRD = 1;                                         // 每次采样事件都产生SOCA
 }
@@ -1356,7 +1365,7 @@ void EPWM4_Init(void)                                                       // �
     EPwm4Regs.TBCTL.bit.PHSEN = TB_DISABLE;                                 // 配置相位同步装载功能
     EPwm4Regs.TBPHS.all = 0;                                                // 将同步相位偏移清零
     EPwm4Regs.TBCTR = 0;                                                    // 将时基计数器清零
-    EPwm4Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                 // 设置中心对齐PWM周期值（20kHz整流桥臂，单极性等效40kHz）
+    EPwm4Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                 // 设置中心对齐PWM周期值（10kHz整流桥臂，单极性等效20kHz）
     EPwm4Regs.TBCTL.bit.CTRMODE = TB_COUNT_UPDOWN;                          // 采用上下计数的中心对齐模式
     EPwm4Regs.TBCTL.bit.HSPCLKDIV = TB_DIV1;                                // 高速时基时钟不分频
     EPwm4Regs.TBCTL.bit.CLKDIV = TB_DIV1;                                   // 时基时钟不分频
@@ -1374,14 +1383,14 @@ void EPWM4_Init(void)                                                       // �
     EPwm4Regs.DBCTL.bit.IN_MODE = 0;                                        // 选择ePWM A作为死区双沿输入
     EPwm4Regs.DBCTL.bit.POLSEL = 2;                                         // 设置互补输出极性
     EPwm4Regs.DBCTL.bit.OUT_MODE = 3;                                       // 同时使能上升沿和下降沿死区
-    EPwm4Regs.DBRED.bit.DBRED = 15;                                         // 设置上升沿死区为15个TBCLK（150ns）
-    EPwm4Regs.DBFED.bit.DBFED = 15;                                         // 设置下降沿死区为15个TBCLK（150ns）
+    EPwm4Regs.DBRED.bit.DBRED = 10;                                         // 设置上升沿死区为10个TBCLK（100ns）
+    EPwm4Regs.DBFED.bit.DBFED = 10;                                         // 设置下降沿死区为10个TBCLK（100ns）
     EPwm4Regs.ETSEL.bit.INTSEL = ET_CTR_ZERO;                               // 选择计数器归零作为ePWM中断事件
     EPwm4Regs.ETSEL.bit.INTEN = 0;                                          // 关闭未使用的ePWM中断请求
     EPwm4Regs.ETPS.bit.INTPRD = ET_1ST;                                     // 配置每次事件产生一次中断标志
-    EPwm4Regs.ETSEL.bit.SOCAEN = 1;                                         // 使能ePWM4的ADC启动脉冲
-    EPwm4Regs.ETSEL.bit.SOCASEL = 2;                                        // 20kHz载波仅在周期点触发一次，保持20kHz控制与采样
-    EPwm4Regs.ETPS.bit.SOCAPRD = 1;                                         // 每次周期点事件均产生SOCA
+    EPwm4Regs.ETSEL.bit.SOCAEN = 0;                                         // 禁用ePWM4 SOCA，避免控制采样随整流载波降为10kHz
+    EPwm4Regs.ETSEL.bit.SOCASEL = 2;                                        // 保留周期点事件选择，当前SOCA已禁用
+    EPwm4Regs.ETPS.bit.SOCAPRD = 1;                                         // 保留事件分频配置，当前SOCA已禁用
 }
 
 void EPWM5_Init(void)                                                       // 初始化整流右桥臂ePWM5
@@ -1401,7 +1410,7 @@ void EPWM5_Init(void)                                                       // �
     EPwm5Regs.TBCTL.bit.PHSDIR = TB_UP;                                    // 同步装载相位0后向上计数，严格跟随ePWM4同相载波
     EPwm5Regs.TBPHS.all = 0;                                                // 将同步相位偏移清零
     EPwm5Regs.TBCTR = 0;                                                    // 将时基计数器清零
-    EPwm5Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                 // 设置中心对齐PWM周期值（20kHz整流桥臂，跟随ePWM4同步）
+    EPwm5Regs.TBPRD = RECTIFIER_EPWM_TBPRD;                                 // 设置中心对齐PWM周期值（10kHz整流桥臂，跟随ePWM4同步）
     EPwm5Regs.TBCTL.bit.CTRMODE = TB_COUNT_UPDOWN;                          // 采用上下计数的中心对齐模式
     EPwm5Regs.TBCTL.bit.HSPCLKDIV = TB_DIV1;                                // 高速时基时钟不分频
     EPwm5Regs.TBCTL.bit.CLKDIV = TB_DIV1;                                   // 时基时钟不分频
@@ -1419,50 +1428,9 @@ void EPWM5_Init(void)                                                       // �
     EPwm5Regs.DBCTL.bit.IN_MODE = 0;                                        // 选择ePWM A作为死区双沿输入
     EPwm5Regs.DBCTL.bit.POLSEL = 2;                                         // 设置互补输出极性
     EPwm5Regs.DBCTL.bit.OUT_MODE = 3;                                       // 同时使能上升沿和下降沿死区
-    EPwm5Regs.DBRED.bit.DBRED = 15;                                         // 设置上升沿死区为15个TBCLK（150ns）
-    EPwm5Regs.DBFED.bit.DBFED = 15;                                         // 设置下降沿死区为15个TBCLK（150ns）
+    EPwm5Regs.DBRED.bit.DBRED = 10;                                         // 设置上升沿死区为10个TBCLK（100ns）
+    EPwm5Regs.DBFED.bit.DBFED = 10;                                         // 设置下降沿死区为10个TBCLK（100ns）
     EPwm5Regs.ETSEL.bit.INTSEL = ET_CTR_ZERO;                               // 选择计数器归零作为ePWM中断事件
     EPwm5Regs.ETSEL.bit.INTEN = 0;                                          // 关闭未使用的ePWM中断请求
     EPwm5Regs.ETPS.bit.INTPRD = ET_1ST;                                     // 配置每次事件产生一次中断标志
-}
-
-void EPWM6_Init(void)                                                       // 初始化未使用的ePWM6
-{
-    EALLOW;                                                                 // 允许访问受保护寄存器
-    CpuSysRegs.PCLKCR2.bit.EPWM6 = 1;                                       // 打开对应ePWM模块外设时钟
-    EPwm6Regs.TZCTL.bit.TZA = TZ_FORCE_LO;                                  // One-Shot Trip发生时从死区模块之后强制ePWM6A为低
-    EPwm6Regs.TZCTL.bit.TZB = TZ_FORCE_LO;                                  // One-Shot Trip发生时从死区模块之后强制ePWM6B为低
-    EPwm6Regs.TZFRC.bit.OST = 1;                                            // 初始化期间立即锁存关断未使用的ePWM6输出
-    EDIS;                                                                   // 重新禁止访问受保护寄存器
-    EPwm6Regs.AQSFRC.bit.RLDCSF = 3;                                        // AQ连续软件强制使用立即模式，仅用于清除可能残留的旧状态
-    EPwm6Regs.AQCSFRC.bit.CSFA = 0;                                         // 禁用旧的ePWM6A AQ连续软件强制
-    EPwm6Regs.AQCSFRC.bit.CSFB = 0;                                         // 禁用旧的ePWM6B AQ连续软件强制
-
-    EPwm6Regs.TBCTL.bit.SYNCOSEL = TB_SYNC_IN;                              // 选择该ePWM的同步输出来源
-    EPwm6Regs.TBCTL.bit.PHSEN = TB_ENABLE;                                  // 配置相位同步装载功能
-    EPwm6Regs.TBPHS.all = 0;                                                // 将同步相位偏移清零
-    EPwm6Regs.TBCTR = 0;                                                    // 将时基计数器清零
-    EPwm6Regs.TBPRD = INVERTER_EPWM_TBPRD;                                   // 设置中心对齐PWM周期值（未使用，保持与逆变侧一致）
-    EPwm6Regs.TBCTL.bit.CTRMODE = TB_COUNT_UPDOWN;                          // 采用上下计数的中心对齐模式
-    EPwm6Regs.TBCTL.bit.HSPCLKDIV = TB_DIV1;                                // 高速时基时钟不分频
-    EPwm6Regs.TBCTL.bit.CLKDIV = TB_DIV1;                                   // 时基时钟不分频
-    EPwm6Regs.CMPCTL.bit.SHDWAMODE = CC_SHADOW;                             // 使能CMPA影子寄存器
-    EPwm6Regs.CMPCTL.bit.SHDWBMODE = CC_SHADOW;                             // 使能CMPB影子寄存器
-    EPwm6Regs.CMPCTL.bit.LOADAMODE = CC_CTR_ZERO;                           // 在计数器归零时装载CMPA
-    EPwm6Regs.CMPCTL.bit.LOADBMODE = CC_CTR_ZERO;                           // 在计数器归零时装载CMPB
-    EPwm6Regs.CMPA.bit.CMPA = 0;                                            // 设置A路比较值
-    EPwm6Regs.AQCTLA.bit.ZRO = AQ_SET;                                      // 计数器归零时将A路输出置高
-    EPwm6Regs.AQCTLA.bit.CAU = AQ_CLEAR;                                    // 上数到CMPA时将A路输出清低
-    EPwm6Regs.AQCTLA.bit.CAD = AQ_SET;                                      // 下数到CMPA时将A路输出置高
-    EPwm6Regs.AQCTLB.bit.ZRO = AQ_SET;                                      // 计数器归零时将B路原始输出置高
-    EPwm6Regs.AQCTLB.bit.CBU = AQ_CLEAR;                                    // 上数到CMPB时将B路原始输出清低
-    EPwm6Regs.AQCTLB.bit.CBD = AQ_SET;                                      // 下数到CMPB时将B路原始输出置高
-    EPwm6Regs.DBCTL.bit.IN_MODE = 0;                                        // 选择ePWM A作为死区双沿输入
-    EPwm6Regs.DBCTL.bit.POLSEL = 2;                                         // 设置互补输出极性
-    EPwm6Regs.DBCTL.bit.OUT_MODE = 3;                                       // 同时使能上升沿和下降沿死区
-    EPwm6Regs.DBRED.bit.DBRED = 15;                                         // 设置上升沿死区为15个TBCLK
-    EPwm6Regs.DBFED.bit.DBFED = 15;                                         // 设置下降沿死区为15个TBCLK
-    EPwm6Regs.ETSEL.bit.INTSEL = ET_CTR_ZERO;                               // 选择计数器归零作为ePWM中断事件
-    EPwm6Regs.ETSEL.bit.INTEN = 0;                                          // 关闭未使用的ePWM中断请求
-    EPwm6Regs.ETPS.bit.INTPRD = ET_1ST;                                     // 配置每次事件产生一次中断标志
 }
