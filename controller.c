@@ -127,9 +127,9 @@ pidsettings pida;                                                           // �
 /////整流输入电流环核心参数//////
 #define CURRENT_CTRL_VOLTAGE_LIMIT 15.0f                                    // 限制电流环电感补偿电压，抑制占空比突变
 #define RECTIFIER_CURRENT_KP 10.0f                                           // 输入电流环比例增益
-#define RECTIFIER_CURRENT_KI 0.02f                                          // 输入电流环保守积分增益
+#define RECTIFIER_CURRENT_KI 0.09f                                          // 输入电流环保守积分增益
 #define RECTIFIER_CURRENT_INTEGRAL_LIMIT 30.0f                              // 积分状态限幅，Ki为0.02时对应最大正负0.6V积分补偿
-#define RECTIFIER_FEEDFORWARD_GAIN 0.80f                                     // 叠加1.00倍输入电压前馈
+#define RECTIFIER_FEEDFORWARD_GAIN 0.9f                                     // 叠加1.00倍输入电压前馈
 #define RECTIFIER_MODULATION_LIMIT 0.98f                                    // 将单极性调制量Di限制在正负0.98以内
 
 #define BUS_REF_MIN_VOLTAGE 45.0f                                           // 母线参考下限为45V
@@ -415,7 +415,7 @@ __interrupt void adcA1ISR(void)                                             // 2
     U_bus = ((float)AdcaResultRegs.ADCRESULT1 - 2060.1f) / 22.44f;           // 按y=26.268x+2067.9将ADCINA1原始值反算为母线电压
     U_oab = ((float)AdcaResultRegs.ADCRESULT2 - 2039.8) / 36.305f;           // 按y=36.353x+2066.7将ADCINA2原始值反算为输出线电压Uab
     U_obc = ((float)AdcaResultRegs.ADCRESULT3 - 2057.9f) / 26.344f;           // 按y=36.169x+2067.9将ADCINA3原始值反算为输出线电压Ubc
-    I_in = ((float)AdcbResultRegs.ADCRESULT0 - 1847.6f) / 159.45f;            // 按y=164.61x+2077.3将ADCINB0原始值反算为输入电流
+    I_in = ((float)AdcbResultRegs.ADCRESULT0 - 2070.0f) / 163.84f;            // 按y=164.61x+2077.3将ADCINB0原始值反算为输入电流
 
     if((system_fault == 0) &&                                               // 已有全局故障时不再用局部故障覆盖OLED故障码
        (rectifier_pwm_start_stage == 3) &&                                  // 仅主动整流PWM正式运行后启用F1，忽略二极管预充浪涌
