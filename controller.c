@@ -113,7 +113,7 @@ pidsettings pida;                                                           // �
 #define GENERAL_KEY_SCAN_ISR_DIV 10000                                      // KEY3～KEY6保持原500ms扫描与重复周期
 /////输入电压、电流和母线保护/////
 #define INPUT_VOLTAGE_MAX_RMS 36.0f                                        // 单相输入电压有效值上限
-#define INPUT_CURRENT_PK_MAX 10.0f                                           // 满功率时限制整流输入电流参考峰值为9.00A
+#define INPUT_CURRENT_PK_MAX 9.0f                                           // 满功率时限制整流输入电流参考峰值为9.00A
 #define INPUT_OVERCURRENT_LIMIT 10.0f                                        // 设置整流输入瞬时软件过流保护阈值为10A
 #define INPUT_OVERCURRENT_CONFIRM_SAMPLES 3U                                // 20kHz下连续3个过流样本才确认F1，最迟约150us
 #define BUS_OVERVOLTAGE_LIMIT 77.0f                                         // 母线软件过压阈值为77V
@@ -126,8 +126,8 @@ pidsettings pida;                                                           // �
 #define RECTIFIER_VOLTAGE_KI 0.003f                                        // 整流母线电压外环积分增益
 /////整流输入电流环核心参数//////
 #define CURRENT_CTRL_VOLTAGE_LIMIT 15.0f                                    // 限制电流环电感补偿电压，抑制占空比突变
-#define RECTIFIER_CURRENT_KP 5.0f                                           // 输入电流环比例增益
-#define RECTIFIER_CURRENT_KI 0.01f                                          // 输入电流环保守积分增益
+#define RECTIFIER_CURRENT_KP 10.0f                                           // 输入电流环比例增益
+#define RECTIFIER_CURRENT_KI 0.02f                                          // 输入电流环保守积分增益
 #define RECTIFIER_CURRENT_INTEGRAL_LIMIT 30.0f                              // 积分状态限幅，Ki为0.02时对应最大正负0.6V积分补偿
 #define RECTIFIER_FEEDFORWARD_GAIN 0.80f                                     // 叠加1.00倍输入电压前馈
 #define RECTIFIER_MODULATION_LIMIT 0.98f                                    // 将单极性调制量Di限制在正负0.98以内
@@ -264,11 +264,7 @@ void main(void)                                                             // �
     GpioCtrlRegs.GPAGMUX1.bit.GPIO2 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO2 = 1;   // 复用为ePWM2A
     GpioCtrlRegs.GPAGMUX1.bit.GPIO3 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO3 = 1;   // 复用为ePWM2B
     GpioCtrlRegs.GPAGMUX1.bit.GPIO4 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO4 = 1;   // 复用为ePWM3A
-    GpioCtrlRegs.GPAGMUX1.bit.GPIO5 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO5 = 1;
-
-
-
-    // 复用为ePWM3B
+    GpioCtrlRegs.GPAGMUX1.bit.GPIO5 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO5 = 1;   // 复用为ePWM3B
     GpioCtrlRegs.GPAGMUX1.bit.GPIO6 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO6 = 1;   // 复用为ePWM4A
     GpioCtrlRegs.GPAGMUX1.bit.GPIO7 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO7 = 1;   // 复用为ePWM4B
     GpioCtrlRegs.GPAGMUX1.bit.GPIO8 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO8 = 1;   // 复用为ePWM5A
@@ -415,11 +411,11 @@ void InitADCSOC(void)                                                       // �
 //******************* ADC中断（20kHz控制核心）*******************//
 __interrupt void adcA1ISR(void)                                             // 20kHz ADC中断与全部实时控制算法
 {
-    U_in = ((float)AdcaResultRegs.ADCRESULT0 - 2066.2f) / 36.443f;            // 按y=36.443x+2066.2将ADCINA0原始值反算为输入电压
-    U_bus = ((float)AdcaResultRegs.ADCRESULT1 - 2067.9f) / 26.268f;           // 按y=26.268x+2067.9将ADCINA1原始值反算为母线电压
-    U_oab = ((float)AdcaResultRegs.ADCRESULT2 - 2066.7f) / 36.353f;           // 按y=36.353x+2066.7将ADCINA2原始值反算为输出线电压Uab
-    U_obc = ((float)AdcaResultRegs.ADCRESULT3 - 2067.9f) / 36.169f;           // 按y=36.169x+2067.9将ADCINA3原始值反算为输出线电压Ubc
-    I_in = ((float)AdcbResultRegs.ADCRESULT0 - 2077.3f) / 164.61f;            // 按y=164.61x+2077.3将ADCINB0原始值反算为输入电流
+    U_in = ((float)AdcaResultRegs.ADCRESULT0 - 2055.2f) / 36.274f;            // 按y=36.443x+2066.2将ADCINA0原始值反算为输入电压
+    U_bus = ((float)AdcaResultRegs.ADCRESULT1 - 2060.1f) / 22.44f;           // 按y=26.268x+2067.9将ADCINA1原始值反算为母线电压
+    U_oab = ((float)AdcaResultRegs.ADCRESULT2 - 2039.8) / 36.305f;           // 按y=36.353x+2066.7将ADCINA2原始值反算为输出线电压Uab
+    U_obc = ((float)AdcaResultRegs.ADCRESULT3 - 2057.9f) / 26.344f;           // 按y=36.169x+2067.9将ADCINA3原始值反算为输出线电压Ubc
+    I_in = ((float)AdcbResultRegs.ADCRESULT0 - 1847.6f) / 159.45f;            // 按y=164.61x+2077.3将ADCINB0原始值反算为输入电流
 
     if((system_fault == 0) &&                                               // 已有全局故障时不再用局部故障覆盖OLED故障码
        (rectifier_pwm_start_stage == 3) &&                                  // 仅主动整流PWM正式运行后启用F1，忽略二极管预充浪涌
