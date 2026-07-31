@@ -113,7 +113,7 @@ pidsettings pida;                                                           // �
 #define GENERAL_KEY_SCAN_ISR_DIV 10000                                      // KEY3～KEY6保持原500ms扫描与重复周期
 /////输入电压、电流和母线保护/////
 #define INPUT_VOLTAGE_MAX_RMS 36.0f                                        // 单相输入电压有效值上限
-#define INPUT_CURRENT_PK_MAX 9.0f                                           // 满功率时限制整流输入电流参考峰值为9.00A
+#define INPUT_CURRENT_PK_MAX 10.0f                                           // 满功率时限制整流输入电流参考峰值为9.00A
 #define INPUT_OVERCURRENT_LIMIT 10.0f                                        // 设置整流输入瞬时软件过流保护阈值为10A
 #define INPUT_OVERCURRENT_CONFIRM_SAMPLES 3U                                // 20kHz下连续3个过流样本才确认F1，最迟约150us
 #define BUS_OVERVOLTAGE_LIMIT 77.0f                                         // 母线软件过压阈值为77V
@@ -126,8 +126,8 @@ pidsettings pida;                                                           // �
 #define RECTIFIER_VOLTAGE_KI 0.003f                                        // 整流母线电压外环积分增益
 /////整流输入电流环核心参数//////
 #define CURRENT_CTRL_VOLTAGE_LIMIT 15.0f                                    // 限制电流环电感补偿电压，抑制占空比突变
-#define RECTIFIER_CURRENT_KP 10.0f                                           // 输入电流环比例增益
-#define RECTIFIER_CURRENT_KI 0.02f                                          // 输入电流环保守积分增益
+#define RECTIFIER_CURRENT_KP 5.0f                                           // 输入电流环比例增益
+#define RECTIFIER_CURRENT_KI 0.01f                                          // 输入电流环保守积分增益
 #define RECTIFIER_CURRENT_INTEGRAL_LIMIT 30.0f                              // 积分状态限幅，Ki为0.02时对应最大正负0.6V积分补偿
 #define RECTIFIER_FEEDFORWARD_GAIN 0.80f                                     // 叠加1.00倍输入电压前馈
 #define RECTIFIER_MODULATION_LIMIT 0.98f                                    // 将单极性调制量Di限制在正负0.98以内
@@ -264,7 +264,11 @@ void main(void)                                                             // �
     GpioCtrlRegs.GPAGMUX1.bit.GPIO2 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO2 = 1;   // 复用为ePWM2A
     GpioCtrlRegs.GPAGMUX1.bit.GPIO3 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO3 = 1;   // 复用为ePWM2B
     GpioCtrlRegs.GPAGMUX1.bit.GPIO4 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO4 = 1;   // 复用为ePWM3A
-    GpioCtrlRegs.GPAGMUX1.bit.GPIO5 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO5 = 1;   // 复用为ePWM3B
+    GpioCtrlRegs.GPAGMUX1.bit.GPIO5 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO5 = 1;
+
+
+
+    // 复用为ePWM3B
     GpioCtrlRegs.GPAGMUX1.bit.GPIO6 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO6 = 1;   // 复用为ePWM4A
     GpioCtrlRegs.GPAGMUX1.bit.GPIO7 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO7 = 1;   // 复用为ePWM4B
     GpioCtrlRegs.GPAGMUX1.bit.GPIO8 = 0;  GpioCtrlRegs.GPAMUX1.bit.GPIO8 = 1;   // 复用为ePWM5A
